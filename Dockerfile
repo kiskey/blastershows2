@@ -7,7 +7,7 @@ COPY package*.json ./
 # ---- Dependencies Stage ----
 FROM base AS dependencies
 ENV NODE_ENV=production
-RUN npm ci
+RUN npm install
 
 # ---- Release Stage ----
 FROM base AS release
