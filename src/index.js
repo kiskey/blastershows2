@@ -5,6 +5,7 @@ const { startServer } = require('./addon');
 const config = require('./utils/config');
 const logger = require('./utils/logger');
 const redisClient = require('./database/redis');
+require('./utils/trackers');
 
 // The entire application will run in a single process.
 // The WorkerPool inside crawler.js will handle the actual concurrency using worker_threads.
