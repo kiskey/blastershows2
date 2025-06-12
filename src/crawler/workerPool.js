@@ -2,74 +2,84 @@
 
 const { Worker } = require('worker_threads');
 const logger = require('../utils/logger');
+const { EventEmitter } = require('events');
 
-class WorkerPool {
+class WorkerPool extends EventEmitter {
     constructor(numThreads, workerPath) {
+        super();
         this.numThreads = numThreads;
         this.workerPath = workerPath;
         this.taskQueue = [];
-        this.workers = new Array(numThreads).fill(null);
-        this.activeWorkers = 0;
-        this.onFinished = null; // A callback to be called when all tasks are done
+        this.workers = [];
+        this.activeTasks = 0;
+        this.onFinished = null;
+
+        for (let i = 0; i < this.numThreads; i++) {
+            this.createWorker(i);
+        }
     }
 
-    /**
-     * Adds a task to the queue and starts processing if idle.
-     * @param {object} taskData
-     */
-    run(taskData) {
-        this.taskQueue.push(taskData);
-        this.checkAndStartWorker();
-    }
-
-    /**
-     * The core logic: if there's a waiting task and an idle worker, start it.
-     */
-    checkAndStartWorker() {
-        if (this.taskQueue.length === 0) {
-            // If the queue is empty and no workers are active, we are done.
-            if (this.activeWorkers === 0 && this.onFinished) {
-                this.onFinished();
-                this.onFinished = null; // Prevent multiple calls
+    createWorker(index) {
+        const worker = new Worker(this.workerPath);
+        
+        worker.on('message', (message) => {
+            if (message === 'ready') {
+                // The worker is ready for a new task.
+                this.dispatchTask(worker);
+            } else if (message === 'done') {
+                // The worker has completed a task.
+                this.activeTasks--;
+                if (this.activeTasks === 0 && this.taskQueue.length === 0) {
+                    if (this.onFinished) {
+                        this.onFinished();
+                        this.onFinished = null;
+                    }
+                }
+                // Now that it's done, it's ready for another task.
+                this.dispatchTask(worker);
             }
-            return;
-        }
-
-        const idleWorkerIndex = this.workers.findIndex(w => w === null);
-        if (idleWorkerIndex === -1) {
-            return; // All workers are busy
-        }
-
-        const task = this.taskQueue.shift();
-        if (!task) return;
-
-        this.activeWorkers++;
-        const worker = new Worker(this.workerPath, { workerData: task });
-        this.workers[idleWorkerIndex] = worker;
-
-        logger.info(`Starting worker #${idleWorkerIndex} for thread: ${task.url}`);
-
-        worker.on('exit', () => {
-            // This is the only event we need to reliably track.
-            this.workers[idleWorkerIndex] = null;
-            this.activeWorkers--;
-            
-            // A worker has finished, immediately check if there's more work to do.
-            this.checkAndStartWorker();
         });
 
         worker.on('error', (err) => {
-            logger.error({ err, url: task.url }, `Worker #${idleWorkerIndex} had a critical error.`);
-            // The 'exit' event will still fire, so cleanup happens there.
+            logger.error({ err }, `Worker #${index} encountered a critical error. Recreating worker.`);
+            // A worker crashed, recreate it to maintain pool size.
+            worker.terminate();
+            this.createWorker(index);
+        });
+
+        worker.on('exit', (code) => {
+            if (code !== 0) {
+                logger.warn(`Worker #${index} exited with code ${code}. Recreating.`);
+                this.createWorker(index);
+            }
+        });
+        
+        this.workers[index] = worker;
+    }
+
+    dispatchTask(worker) {
+        if (this.taskQueue.length > 0) {
+            const task = this.taskQueue.shift();
+            worker.postMessage(task);
+        }
+    }
+
+    run(taskData) {
+        this.taskQueue.push(taskData);
+        this.activeTasks++;
+        // Find an idle worker to start processing immediately
+        this.workers.forEach(worker => {
+            // A truly idle worker would have no active task and would have messaged 'ready'.
+            // A simpler approach is to just try to dispatch to all, the worker logic will handle it.
+            // This is a bit brute-force but effective.
+            this.dispatchTask(worker);
+
         });
     }
 
-    /**
-     * Returns a promise that resolves when all queued tasks are completed.
-     */
     wait() {
         return new Promise(resolve => {
-            if (this.taskQueue.length === 0 && this.activeWorkers === 0) {
+            if (this.activeTasks === 0 && this.taskQueue.length === 0) {
                 return resolve();
             }
             this.onFinished = resolve;
