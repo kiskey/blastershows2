@@ -1,6 +1,6 @@
 // src/workers/threadProcessor.js
 
-const { parentPort } = require('worker_threads');
+const { workerData, parentPort } = require('worker_threads');
 const axios = require('axios');
 const { parseThreadPage } = require('../parser/htmlParser');
 const { parseTitle, normalizeBaseTitle } = require('../parser/titleParser');
@@ -8,7 +8,11 @@ const dataManager = require('../database/dataManager');
 const config = require('../utils/config');
 const logger = require('../utils/logger');
 
-// --- Helper Functions (remain the same) ---
+/**
+ * Fetches the HTML content of a given thread URL.
+ * @param {string} url - The URL of the thread to fetch.
+ * @returns {Promise<string|null>} The HTML content or null on failure.
+ */
 async function fetchThreadHtml(url) {
     try {
         const { data } = await axios.get(url, {
@@ -24,6 +28,11 @@ async function fetchThreadHtml(url) {
     }
 }
 
+/**
+ * The main processing function for a single thread.
+ * It fetches, parses, and stores data in Redis.
+ * @param {string} threadUrl - The URL of the forum thread.
+ */
 async function processThread(threadUrl) {
     try {
         const html = await fetchThreadHtml(threadUrl);
@@ -37,15 +46,21 @@ async function processThread(threadUrl) {
 
         const baseTitle = normalizeBaseTitle(threadData.title);
         const yearMatch = threadData.title.match(/\b(19|20)\d{2}\b/);
-        const year = yearMatch ? yearMatch[0] : null;
+        
+        // Use 'nya' (No Year Available) as a placeholder if year is not found.
+        // This makes the movieKey consistent and sortable.
+        const year = yearMatch ? yearMatch[0] : 'nya';
 
-        if (!baseTitle || !year) {
-            logger.warn({ originalTitle: threadData.title, baseTitle, year, url: threadUrl }, 'Could not determine a valid base title or year. Skipping.');
+        if (!baseTitle) {
+            logger.warn({ originalTitle: threadData.title, url: threadUrl }, 'Could not determine a valid base title. Skipping.');
             return;
         }
 
         const movieKey = `tbs-${baseTitle.replace(/\s+/g, '-')}-${year}`;
-        await dataManager.findOrCreateShow(movieKey, threadData.title, threadData.posterUrl, year);
+
+        // Pass the original year (or null if not found) to the dataManager for storage.
+        const originalYear = year === 'nya' ? null : year;
+        await dataManager.findOrCreateShow(movieKey, threadData.title, threadData.posterUrl, originalYear);
 
         for (const magnetUri of threadData.magnets) {
             const parsedStream = parseTitle(magnetUri);
@@ -55,35 +70,27 @@ async function processThread(threadUrl) {
         }
 
         await dataManager.updateThreadTimestamp(threadUrl);
+
     } catch (error) {
         logger.error({ err: error.message, url: threadUrl, stack: error.stack }, 'Error processing thread');
     }
 }
 
-// --- Main Worker Loop ---
-async function main() {
-    // Listen for tasks from the main thread
-    parentPort.on('message', async (task) => {
-        if (task && task.url) {
-            logger.debug({ url: task.url }, `Worker received task.`);
-            await processThread(task.url);
+// This is the self-executing block that runs when the file is loaded as a worker.
+(async () => {
+    const { url } = workerData;
+    if (url) {
+        await processThread(url);
+    }
 
-            // Trigger garbage collection after processing
-            if (global.gc) {
-                global.gc();
-            }
+    // After all work is done, manually trigger garbage collection.
+    if (global.gc) {
+        global.gc();
+        logger.debug({ url }, 'Garbage collection triggered in worker.');
+    }
 
-            // Signal that this worker has completed its task and is ready for more.
-            parentPort.postMessage('done');
-        }
-    });
-
-    // Signal that the worker has initialized and is ready for its first task.
-    parentPort.postMessage('ready');
-}
-
-main().catch(err => {
-    logger.error({ err }, 'Worker main loop crashed');
-    // In case of a crash, try to signal completion so the pool can recover.
-    parentPort.postMessage('done');
-});
+    // Post a simple message back to indicate the task is complete.
+    if (parentPort) {
+        parentPort.postMessage('done');
+    }
+})();
