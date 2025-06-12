@@ -17,7 +17,10 @@ const LANG_MAP = {
  * @returns {object|null} Parsed metadata or null if invalid.
  */
 function parseTitle(magnetUri) {
-    const infoHashMatch = magnetUri.match(BTITIH_REGEX);
+    // ---- THIS IS THE FIX ----
+    const infoHashMatch = magnetUri.match(BTIH_REGEX); 
+    // ---- END OF FIX ----
+
     if (!infoHashMatch) {
         logger.warn({ magnet: magnetUri }, 'Invalid magnet URI: No BTIH found.');
         return null;
