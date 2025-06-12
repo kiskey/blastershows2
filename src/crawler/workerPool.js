@@ -1,3 +1,4 @@
+// src/crawler/workerPool.js (Updated)
 const { Worker } = require('worker_threads');
 const logger = require('../utils/logger');
 
@@ -5,41 +6,54 @@ class WorkerPool {
     constructor(numThreads, workerPath) {
         this.numThreads = numThreads;
         this.workerPath = workerPath;
-        this.activeWorkers = new Set();
+        this.workers = new Array(numThreads).fill(null);
         this.taskQueue = [];
     }
 
     run(taskData) {
-        this.taskQueue.push(taskData);
-        this.tryStartWorker();
+        return new Promise((resolve, reject) => {
+            const task = { data: taskData, resolve, reject };
+            this.taskQueue.push(task);
+            this.tryStartWorker();
+        });
     }
 
     tryStartWorker() {
-        if (this.taskQueue.length === 0 || this.activeWorkers.size >= this.numThreads) {
+        if (this.taskQueue.length === 0) {
+            return;
+        }
+        
+        const idleWorkerIndex = this.workers.findIndex(worker => worker === null);
+        if (idleWorkerIndex === -1) {
+            // All workers are busy, they will pick up tasks when they are done.
             return;
         }
 
-        const taskData = this.taskQueue.shift();
-        const worker = new Worker(this.workerPath, { workerData: taskData });
-        this.activeWorkers.add(worker);
+        const task = this.taskQueue.shift();
+        if (!task) return;
 
-        logger.info(`Starting worker for thread: ${taskData.threadUrl}`);
+        const worker = new Worker(this.workerPath, { workerData: task.data });
+        this.workers[idleWorkerIndex] = worker;
+
+        logger.info(`Starting worker #${idleWorkerIndex} for thread: ${task.data.threadUrl}`);
 
         worker.on('message', (result) => {
-            logger.info(`Worker finished task for ${taskData.threadUrl} with status: ${result.status}`);
+            logger.info(`Worker #${idleWorkerIndex} finished task for ${task.data.threadUrl} with status: ${result.status}`);
+            task.resolve(result); // Resolve the promise for this task
         });
 
         worker.on('error', (error) => {
-            logger.error({ err: error, url: taskData.threadUrl }, 'A worker encountered an error');
+            logger.error({ err: error, url: task.data.threadUrl }, `Worker #${idleWorkerIndex} encountered an error`);
+            task.reject(error); // Reject the promise
         });
 
         worker.on('exit', (code) => {
             if (code !== 0) {
-                logger.warn(`Worker for ${taskData.threadUrl} stopped with exit code ${code}`);
-                // Optional: Re-queue the task
-                // this.taskQueue.unshift(taskData);
+                logger.warn(`Worker #${idleWorkerIndex} for ${task.data.threadUrl} stopped with exit code ${code}`);
+                // Optional: Re-queue the task if it failed unexpectedly
+                // this.taskQueue.unshift(task);
             }
-            this.activeWorkers.delete(worker);
+            this.workers[idleWorkerIndex] = null; // Mark worker as idle
             // Check if there are more tasks to process
             this.tryStartWorker();
         });
