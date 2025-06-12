@@ -1,0 +1,44 @@
+# .github/workflows/docker-publish.yml
+
+name: Build and Push Docker Image
+
+# This workflow runs on every push to the 'main' branch
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. Checkout the repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Log in to Docker Hub
+      #    Uses secrets to avoid exposing credentials in the code.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 3. Set up Docker Buildx
+      #    This is a required step for the build-push-action.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 4. Build the Docker image and push it to Docker Hub
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true # This tells the action to push the image after building
+          tags: |
+            # IMPORTANT: Replace 'your-image-name' with your desired image name.
+            # Example: ${{ secrets.DOCKERHUB_USERNAME }}/stremio-tamilblasters-addon:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/blastershows-addon:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/blastershows-addon:${{ substr(github.sha, 0, 7) }}
