@@ -3,14 +3,7 @@
 const redis = require('./redis');
 const logger = require('../utils/logger');
 
-/**
- * Creates or retrieves a show. The unique ID is based on title and year.
- * @param {string} movieKey - The unique key (e.g., tbs-mercy-for-none-2023)
- * @param {string} originalTitle - The human-readable title from the thread
- * @param {string} posterUrl - The poster URL
- * @param {string} year - The release year
- * @returns {Promise<{id: string, name: string, poster: string}>}
- */
+// ... findOrCreateShow, getCatalog, getMeta functions remain the same ...
 async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
     const showKey = `show:${movieKey}`;
     const exists = await redis.exists(showKey);
@@ -39,53 +32,46 @@ async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
 
 
 /**
- * Adds a parsed stream to the corresponding show. Handles multi-episode torrents.
+ * Adds a parsed stream to the corresponding show. Handles multi-episode torrents correctly.
  * @param {string} movieKey - The unique show ID
  * @param {Object} streamInfo - Parsed stream data from titleParser
  */
 async function addStream(movieKey, streamInfo) {
-    const { infoHash, name, resolution, languages, size, season, episodes } = streamInfo;
+    // ---- START OF NEW LOGIC ----
+    const { infoHash, name, resolution, languages, size, episodes } = streamInfo;
+    const season = streamInfo.season || 1;
 
-    // If the torrent is for a pack but no specific episodes were parsed, treat it as one stream for the season.
-    if (episodes.length === 0 && season) {
-        const streamId = `${infoHash}:s${season}`; // Unique ID for a season pack
-        const streamKey = `stream:${movieKey}`;
-        const streamData = JSON.stringify({
-            id: streamId,
-            name: `[${resolution}] Season ${season} Pack`, // User-facing name
-            title: name,
-            infoHash,
-            season,
-            episode: null, // Indicates it's a pack, not a single episode
-            languages,
-            size
-        });
-        await redis.hset(streamKey, streamId, streamData);
-        logger.debug({ movieKey, streamId }, 'Added/updated season pack stream.');
-        return;
+    // Determine if this is a single episode or a pack
+    const isPack = episodes.length > 1;
+    const singleEpisode = episodes.length === 1 ? episodes[0] : null;
+
+    if (episodes.length === 0) {
+        logger.warn({ movieKey, name }, "Could not add stream: No episode information found.");
+        return; // Do not add a stream if no episodes could be parsed.
     }
 
-    // If we have specific episode numbers, create a stream for each one.
-    for (const episode of episodes) {
-        // Create a unique ID for this specific episode and quality
-        const streamId = `${infoHash}:s${season}e${episode}:${resolution}`;
-        const streamKey = `stream:${movieKey}`;
+    // Create a unique ID. For packs, just use the season. For single eps, use the episode number.
+    const streamIdSuffix = isPack ? `s${season}-pack` : `s${season}e${singleEpisode}`;
+    const streamId = `${infoHash}:${streamIdSuffix}:${resolution}`;
 
-        // ---- CHANGE: Store season and episode in the stream data ----
-        const streamData = JSON.stringify({
-            id: streamId,
-            infoHash,
-            season,
-            episode, // Store the specific episode number
-            title: name, // The full original name of the torrent
-            resolution,
-            languages,
-            size
-        });
+    const streamKey = `stream:${movieKey}`;
 
-        await redis.hset(streamKey, streamId, streamData);
-        logger.debug({ movieKey, streamId }, 'Added/updated episode stream.');
-    }
+    // Store all relevant info, including the episode array for packs.
+    const streamData = JSON.stringify({
+        id: streamId,
+        infoHash,
+        season,
+        episodes, // Store the full array [1, 2, 3...] or [7]
+        isPack,
+        title: name,
+        resolution,
+        languages,
+        size
+    });
+
+    await redis.hset(streamKey, streamId, streamData);
+    logger.debug({ movieKey, streamId, isPack }, 'Added/updated stream.');
+    // ---- END OF NEW LOGIC ----
 }
 
 
@@ -104,7 +90,7 @@ async function getCatalog() {
         const cleanName = pttTitleMatch ? pttTitleMatch[1].trim() : data.originalTitle;
 
         return {
-            id: keys[index].substring(5), // remove 'show:' prefix
+            id: keys[index].substring(5),
             type: 'movie',
             name: `${cleanName} (${data.year})`,
             poster: data.posterUrl,
@@ -136,25 +122,25 @@ async function getStreams(movieKey) {
 
     const streams = streamData.map(data => {
         const parsed = JSON.parse(data);
-
-        // ---- START OF CHANGES ----
-
-        // Construct the new user-facing name and title
-        let streamName, streamTitle;
         const langString = parsed.languages.join('+');
+        const seasonNum = String(parsed.season).padStart(2, '0');
 
-        if (parsed.episode) {
+        let streamName, streamTitle;
+
+        // ---- START OF NEW LOGIC ----
+        if (parsed.isPack) {
+            // It's a pack of multiple episodes
+            const startEp = String(parsed.episodes[0]).padStart(2, '0');
+            const endEp = String(parsed.episodes[parsed.episodes.length - 1]).padStart(2, '0');
+            streamName = `${parsed.resolution} - S${seasonNum} E${startEp}-E${endEp} Pack`;
+            streamTitle = `Season ${seasonNum} Pack - ${langString}\n${parsed.size || ''}`;
+        } else {
             // It's a single episode
-            const seasonNum = String(parsed.season).padStart(2, '0');
-            const episodeNum = String(parsed.episode).padStart(2, '0');
+            const episodeNum = String(parsed.episodes[0]).padStart(2, '0');
             streamName = `${parsed.resolution} - S${seasonNum}E${episodeNum}`;
             streamTitle = `S${seasonNum}E${episodeNum} - ${langString}\n${parsed.size || ''}`;
-        } else {
-            // It's a season pack
-            const seasonNum = String(parsed.season).padStart(2, '0');
-            streamName = `${parsed.resolution} - Season ${seasonNum} Pack`;
-            streamTitle = `Season ${seasonNum} - ${langString}\n${parsed.size || ''}`;
         }
+        // ---- END OF NEW LOGIC ----
 
         return {
             name: streamName,
@@ -162,11 +148,9 @@ async function getStreams(movieKey) {
             infoHash: parsed.infoHash,
             url: `magnet:?xt=urn:btih:${parsed.infoHash}&dn=${encodeURIComponent(parsed.title)}`
         };
-
-        // ---- END OF CHANGES ----
     });
 
-    // Sort streams: Higher resolution first, then by season, then by episode
+    // Sorting logic remains the same and will handle packs correctly
     streams.sort((a, b) => {
         const resA = parseInt(a.name.match(/\d{3,4}/)?.[0] || 0);
         const resB = parseInt(b.name.match(/\d{3,4}/)?.[0] || 0);
@@ -184,6 +168,7 @@ async function getStreams(movieKey) {
     return streams;
 }
 
+// ... updateThreadTimestamp and getThreadsToRevisit functions remain the same ...
 async function updateThreadTimestamp(threadUrl) {
     const threadKey = `thread:${Buffer.from(threadUrl).toString('base64')}`;
     await redis.hset(threadKey, 'lastVisited', new Date().toISOString());
@@ -210,6 +195,7 @@ async function getThreadsToRevisit() {
 
     return threadsToRevisit;
 }
+
 
 module.exports = {
     findOrCreateShow,
