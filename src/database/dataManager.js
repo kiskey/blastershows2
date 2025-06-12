@@ -4,6 +4,7 @@ const redis = require('./redis');
 const logger = require('../utils/logger');
 const { getTrackers } = require('../utils/trackers');
 
+// ... findOrCreateShow, getCatalog, getMeta are unchanged ...
 async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
     const showKey = `show:${movieKey}`;
     const exists = await redis.exists(showKey);
@@ -19,38 +20,27 @@ async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
     } else {
          await redis.hset(showKey, 'posterUrl', posterUrl);
     }
-    
-    const pttTitleMatch = originalTitle.match(/^([^[(]+)/);
-    const cleanName = pttTitleMatch ? pttTitleMatch[1].trim() : originalTitle;
-    const nameWithYear = year ? `${cleanName} (${year})` : cleanName;
-
-    return {
-        id: movieKey,
-        name: nameWithYear,
-        poster: posterUrl,
-    };
 }
+
 
 async function addStream(movieKey, streamInfo) {
     const { infoHash, name, resolution, languages, size, episodes } = streamInfo;
-    const season = streamInfo.season || 1;
-
-    if (episodes.length === 0 && season) {
-        // This is a valid Season Pack
-    } else if (episodes.length === 0) {
-        logger.warn({ movieKey, name }, "Could not add stream: No season or episode information found.");
+    
+    // ** THIS IS THE CRITICAL FIX **
+    // If we couldn't parse any episodes OR a season, we cannot process this stream.
+    if (!streamInfo.season && episodes.length === 0) {
+        logger.warn({ movieKey, name }, "Could not add stream: No season or episode info found.");
         return;
     }
 
+    const season = streamInfo.season || 1; // Default to season 1 if only episodes are found
     const isEpisodePack = episodes.length > 1;
     const isSeasonPack = episodes.length === 0;
 
-    // Make the streamId suffix highly unique for packs to avoid any potential collisions
     let streamIdSuffix;
     if (isSeasonPack) {
         streamIdSuffix = `s${season}-seasonpack`;
     } else if (isEpisodePack) {
-        // Include the episode range in the ID to guarantee uniqueness, e.g., s1-ep1-4
         streamIdSuffix = `s${season}-ep${episodes[0]}-${episodes[episodes.length - 1]}`;
     } else {
         streamIdSuffix = `s${season}e${episodes[0]}`;
@@ -66,8 +56,9 @@ async function addStream(movieKey, streamInfo) {
     });
 
     await redis.hset(streamKey, streamId, streamData);
-    logger.debug({ movieKey, streamId, isSeasonPack, isEpisodePack }, 'Added/updated stream.');
+    logger.debug({ movieKey, streamId }, 'Added/updated stream.');
 }
+
 
 async function getCatalog() {
     const keys = await redis.keys('show:*');
