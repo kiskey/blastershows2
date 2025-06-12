@@ -9,7 +9,6 @@ const dataManager = require('../database/dataManager');
 
 const workerPool = new WorkerPool(config.MAX_CONCURRENCY, './src/workers/threadProcessor.js');
 
-// ... (getValidUrl, fetchPage, parseThreadLinks functions remain the same) ...
 async function getValidUrl(url) {
     try {
         const response = await axios.get(config.DOMAIN_MONITOR, {
@@ -52,11 +51,9 @@ function parseThreadLinks(html) {
     return [...new Set(links)];
 }
 
-
 async function runCrawler(isInitial = false) {
     logger.info('Crawler run starting...');
     const baseUrl = await getValidUrl(config.FORUM_URL);
-    // If INITIAL_PAGES is 0, crawl all pages.
     const maxPages = isInitial && config.INITIAL_PAGES > 0 ? config.INITIAL_PAGES : Infinity;
     let totalThreadsFound = 0;
 
@@ -72,13 +69,11 @@ async function runCrawler(isInitial = false) {
             }
 
             const threadUrls = parseThreadLinks(html);
-            logger.info(`Found ${threadUrls.length} threads on page ${i}. Adding to bounded queue...`);
+            totalThreadsFound += threadUrls.length;
+            logger.info(`Found ${threadUrls.length} threads on page ${i}. Adding to queue...`);
 
-            // This loop now applies backpressure. It will pause here if the queue is full.
-            for (const threadUrl of threadUrls) {
-                await workerPool.run({ threadUrl });
-                totalThreadsFound++;
-            }
+            // Add all tasks to the pool. The pool will manage starting them.
+            threadUrls.forEach(url => workerPool.run({ url }));
 
             await new Promise(resolve => setTimeout(resolve, 500)); 
 
@@ -89,21 +84,18 @@ async function runCrawler(isInitial = false) {
     }
     
     logger.info(`Crawler page discovery finished. Total threads queued: ${totalThreadsFound}. Waiting for all workers to complete...`);
-    await workerPool.onDrained();
+    // Use the new, simpler wait() method.
+    await workerPool.wait();
     logger.info('All worker tasks have been completed. Crawler run is fully finished.');
 }
 
-
-// ... (revisitOldThreads and scheduleCrawls functions remain the same, but should also use the new async/await pattern if they queue many tasks)
 async function revisitOldThreads() {
     logger.info('Checking for old threads to revisit...');
     const threadsToRevisit = await dataManager.getThreadsToRevisit();
     if (threadsToRevisit.length > 0) {
         logger.info(`Revisiting ${threadsToRevisit.length} old threads.`);
-        for (const threadUrl of threadsToRevisit) {
-            await workerPool.run({ threadUrl });
-        }
-        await workerPool.onDrained();
+        threadsToRevisit.forEach(url => workerPool.run({ url }));
+        await workerPool.wait();
         logger.info('Old thread revisit complete.');
     } else {
         logger.info('No old threads require revisiting at this time.');
@@ -130,7 +122,7 @@ function scheduleCrawls() {
         }
     }, config.CRAWL_INTERVAL * 1000);
 
-    setInterval(async () => {
+    setInterval(async ().
         if (isRevisitingOld) {
             logger.warn('Old thread revisit is already in progress. Skipping this interval.');
             return;
@@ -146,6 +138,5 @@ function scheduleCrawls() {
         }
     }, 60 * 60 * 1000);
 }
-
 
 module.exports = { runCrawler, scheduleCrawls };
