@@ -2,96 +2,77 @@
 
 const { Worker } = require('worker_threads');
 const logger = require('../utils/logger');
-const { EventEmitter } = require('events');
 
-const MAX_QUEUE_SIZE = 200; 
-
-class WorkerPool extends EventEmitter {
+class WorkerPool {
     constructor(numThreads, workerPath) {
-        super();
         this.numThreads = numThreads;
         this.workerPath = workerPath;
-        this.workers = new Array(numThreads).fill(null);
         this.taskQueue = [];
-        this.activeTasks = 0;
-        this.isDrained = true;
+        this.workers = new Array(numThreads).fill(null);
+        this.activeWorkers = 0;
+        this.onFinished = null; // A callback to be called when all tasks are done
     }
 
-    async run(taskData) {
-        while (this.taskQueue.length >= MAX_QUEUE_SIZE) {
-            await new Promise(resolve => this.once('ready', resolve));
-        }
-        
+    /**
+     * Adds a task to the queue and starts processing if idle.
+     * @param {object} taskData
+     */
+    run(taskData) {
         this.taskQueue.push(taskData);
-        this.isDrained = false;
-        this.processQueue();
+        this.checkAndStartWorker();
     }
 
-    processQueue() {
-        while (this.taskQueue.length > 0) {
-            const idleWorkerIndex = this.workers.findIndex(w => w === null);
-            if (idleWorkerIndex === -1) {
-                break;
+    /**
+     * The core logic: if there's a waiting task and an idle worker, start it.
+     */
+    checkAndStartWorker() {
+        if (this.taskQueue.length === 0) {
+            // If the queue is empty and no workers are active, we are done.
+            if (this.activeWorkers === 0 && this.onFinished) {
+                this.onFinished();
+                this.onFinished = null; // Prevent multiple calls
             }
-
-            const taskData = this.taskQueue.shift();
-            if (!taskData) continue;
-
-            this.emit('ready');
-            this.activeTasks++;
-            this.startWorker(idleWorkerIndex, taskData);
+            return;
         }
-    }
 
-    startWorker(workerIndex, taskData) {
-        // This is now the simple, correct way to create a worker.
-        // It will inherit the --expose-gc flag from the main process.
-        const worker = new Worker(this.workerPath, { 
-            workerData: taskData
-        });
-        
-        this.workers[workerIndex] = worker;
+        const idleWorkerIndex = this.workers.findIndex(w => w === null);
+        if (idleWorkerIndex === -1) {
+            return; // All workers are busy
+        }
 
-        logger.info(`Starting worker #${workerIndex} for thread: ${taskData.threadUrl}`);
+        const task = this.taskQueue.shift();
+        if (!task) return;
 
-        const onDone = () => {
-            if (this.workers[workerIndex] !== null) {
-                this.workers[workerIndex] = null;
-                this.activeTasks--;
-                
-                this.processQueue();
+        this.activeWorkers++;
+        const worker = new Worker(this.workerPath, { workerData: task });
+        this.workers[idleWorkerIndex] = worker;
 
-                if (this.activeTasks === 0 && this.taskQueue.length === 0) {
-                    this.isDrained = true;
-                    this.emit('drained');
-                }
-            }
-        };
+        logger.info(`Starting worker #${idleWorkerIndex} for thread: ${task.url}`);
 
-        worker.on('message', () => {
-            // Let 'exit' handle the onDone call to ensure it's always called.
+        worker.on('exit', () => {
+            // This is the only event we need to reliably track.
+            this.workers[idleWorkerIndex] = null;
+            this.activeWorkers--;
+            
+            // A worker has finished, immediately check if there's more work to do.
+            this.checkAndStartWorker();
         });
 
-        worker.on('error', (error) => {
-            logger.error({ err: error, url: taskData.threadUrl }, `Worker #${workerIndex} encountered an error`);
-        });
-
-        worker.on('exit', (code) => {
-            if (code !== 0) {
-                logger.warn(`Worker #${workerIndex} for ${taskData.threadUrl} stopped with exit code ${code}`);
-            }
-            // onDone() is the single point of cleanup and continuation.
-            onDone();
+        worker.on('error', (err) => {
+            logger.error({ err, url: task.url }, `Worker #${idleWorkerIndex} had a critical error.`);
+            // The 'exit' event will still fire, so cleanup happens there.
         });
     }
 
-    onDrained() {
+    /**
+     * Returns a promise that resolves when all queued tasks are completed.
+     */
+    wait() {
         return new Promise(resolve => {
-            if (this.isDrained) {
-                resolve();
-            } else {
-                this.once('drained', resolve);
+            if (this.taskQueue.length === 0 && this.activeWorkers === 0) {
+                return resolve();
             }
+            this.onFinished = resolve;
         });
     }
 }
