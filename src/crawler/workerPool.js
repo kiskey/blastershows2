@@ -4,6 +4,10 @@ const { Worker } = require('worker_threads');
 const logger = require('../utils/logger');
 const { EventEmitter } = require('events');
 
+// A high-water mark for the queue. If the queue size exceeds this, the crawler will wait.
+// 2 * numThreads is a safe default, meaning we buffer a few tasks per worker.
+const MAX_QUEUE_SIZE = 200; 
+
 class WorkerPool extends EventEmitter {
     constructor(numThreads, workerPath) {
         super();
@@ -12,24 +16,22 @@ class WorkerPool extends EventEmitter {
         this.workers = new Array(numThreads).fill(null);
         this.taskQueue = [];
         this.activeTasks = 0;
-
-        // Listen for internal event when a task is done
-        this.on('task_done', () => {
-            this.activeTasks--;
-            // If all queues and active workers are done, emit a 'drained' event
-            if (this.activeTasks === 0 && this.taskQueue.length === 0) {
-                this.emit('drained');
-            }
-        });
+        this.isDrained = true;
     }
 
     /**
-     * Adds a task to the queue and immediately tries to process it.
-     * This is now a "fire-and-forget" method.
+     * Adds a task to the queue. Returns a Promise that resolves when the task
+     * has been successfully added. It will wait if the queue is full.
      * @param {object} taskData - The data for the worker.
      */
-    run(taskData) {
+    async run(taskData) {
+        // If the queue is full, wait for the 'ready' event.
+        while (this.taskQueue.length >= MAX_QUEUE_SIZE) {
+            await new Promise(resolve => this.once('ready', resolve));
+        }
+        
         this.taskQueue.push(taskData);
+        this.isDrained = false;
         this.processQueue();
     }
 
@@ -43,6 +45,9 @@ class WorkerPool extends EventEmitter {
             const taskData = this.taskQueue.shift();
             if (!taskData) continue;
 
+            // Signal that the queue has a free slot.
+            this.emit('ready');
+
             this.activeTasks++;
             this.startWorker(idleWorkerIndex, taskData);
         }
@@ -55,16 +60,22 @@ class WorkerPool extends EventEmitter {
         logger.info(`Starting worker #${workerIndex} for thread: ${taskData.threadUrl}`);
 
         const onDone = () => {
-            // This ensures we only handle completion once
             if (this.workers[workerIndex] !== null) {
                 this.workers[workerIndex] = null;
-                this.emit('task_done');
-                this.processQueue(); // A worker is free, check for more tasks
+                this.activeTasks--;
+                
+                // A worker is free, check for more tasks
+                this.processQueue();
+
+                // If all work is done, emit the drained event
+                if (this.activeTasks === 0 && this.taskQueue.length === 0) {
+                    this.isDrained = true;
+                    this.emit('drained');
+                }
             }
         };
 
         worker.on('message', (result) => {
-            logger.info(`Worker #${workerIndex} finished task for ${taskData.threadUrl} with status: ${result.status}`);
             onDone();
         });
 
@@ -77,18 +88,13 @@ class WorkerPool extends EventEmitter {
             if (code !== 0) {
                 logger.warn(`Worker #${workerIndex} for ${taskData.threadUrl} stopped with exit code ${code}`);
             }
-            // The 'message' or 'error' event should have already called onDone,
-            // but this is a safeguard to ensure the slot is always freed.
             onDone();
         });
     }
 
-    /**
-     * Returns a promise that resolves when all tasks in the queue have been processed.
-     */
     onDrained() {
         return new Promise(resolve => {
-            if (this.activeTasks === 0 && this.taskQueue.length === 0) {
+            if (this.isDrained) {
                 resolve();
             } else {
                 this.once('drained', resolve);
