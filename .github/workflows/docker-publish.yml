@@ -41,4 +41,3 @@ jobs:
             # IMPORTANT: Replace 'your-image-name' with your desired image name.
             # Example: ${{ secrets.DOCKERHUB_USERNAME }}/stremio-tamilblasters-addon:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/blastershows-addon:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/blastershows-addon:${{ substr(github.sha, 0, 7) }}
