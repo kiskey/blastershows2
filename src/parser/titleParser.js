@@ -12,12 +12,24 @@ const LANG_MAP = {
 
 // --- START OF ENHANCED REGEX PATTERNS ---
 const REGEX_PATTERNS = [
-    /S(\d{1,2})\s?EP\((\d{1,2})-(\d{1,2})\)/i, // S01EP(01-09)
-    /S(\d{1,2})\s?E(\d{1,2})-E?(\d{1,2})/i,     // S01 E01-E09
-    /S(\d{1,2})\s?\((\d{1,2})-(\d{1,2})\)/i      // S01 (01-24) - NEW
+    // Pattern to handle S01EP(01-09) or S01 EP(01-09)
+    /S(\d{1,2})\s?EP\((\d{1,2})-(\d{1,2})\)/i,
+    // Pattern to handle S01 E01-E09 or S01E01-09 (no space)
+    /S(\d{1,2})\s?E(\d{1,2})-E?(\d{1,2})/i,
+    // Pattern to handle S01EP01-04 (no space, no parentheses) - NEW
+    /S(\d{1,2})EP(\d{1,2})-(\d{1,2})/i,
+    // Pattern to handle S01 (01-24)
+    /S(\d{1,2})\s?\((\d{1,2})-(\d{1,2})\)/i,
+    // Pattern to handle just EP(01-04) or similar, assuming season is parsed elsewhere
+    /EP\(?(\d{1,2})-(\d{1,2})\)?/i,
 ];
 // --- END OF ENHANCED REGEX PATTERNS ---
 
+/**
+ * Parses all possible metadata from a torrent title/magnet URI.
+ * @param {string} magnetUri - The magnet URI.
+ * @returns {object|null} Parsed metadata or null if invalid.
+ */
 function parseTitle(magnetUri) {
     const infoHashMatch = magnetUri.match(BTIH_REGEX);
     if (!infoHashMatch) { return null; }
@@ -27,39 +39,45 @@ function parseTitle(magnetUri) {
     const titleToParse = dnMatch ? decodeURIComponent(dnMatch[1]).replace(/\+/g, ' ') : '';
     if (!titleToParse) { return null; }
     
+    // First, use the library for a base parse of season, year, etc.
     const ptt = parse(titleToParse);
 
     let season = ptt.season;
     let episodes = [];
 
-    if (ptt.episode) {
-        if (ptt.to_episode) {
-            for (let i = ptt.episode; i <= ptt.to_episode; i++) { episodes.push(i); }
-        } else {
-            episodes.push(ptt.episode);
-        }
-    } else {
-        // Library failed, try our custom regex patterns in order
-        for (const regex of REGEX_PATTERNS) {
-            const match = titleToParse.match(regex);
-            if (match) {
+    // Prioritize our robust regex patterns for episode packs first.
+    let matched = false;
+    for (const regex of REGEX_PATTERNS) {
+        const match = titleToParse.match(regex);
+        if (match) {
+            // Handle regex patterns with a season group
+            if (regex.source.includes('S(\\d{1,2})')) {
                 season = parseInt(match[1], 10);
                 const startEp = parseInt(match[2], 10);
                 const endEp = parseInt(match[3], 10);
-                for (let i = startEp; i <= endEp; i++) {
-                    episodes.push(i);
-                }
-                break; // Found a match, no need to check other patterns
+                for (let i = startEp; i <= endEp; i++) { episodes.push(i); }
+            } else { // Handle regex patterns without a season group (e.g., just EP01-04)
+                const startEp = parseInt(match[1], 10);
+                const endEp = parseInt(match[2], 10);
+                for (let i = startEp; i <= endEp; i++) { episodes.push(i); }
             }
+            matched = true;
+            break; // Found a match, no need to check other patterns
         }
     }
 
+    // If our regex didn't find a pack, fall back to the library's single episode parsing.
+    if (!matched && ptt.episode) {
+        episodes.push(ptt.episode);
+    }
+
+    // --- Other metadata parsing (remains the same) ---
     const resolution = ptt.resolution || 'N/A';
     const sizeMatch = titleToParse.match(/(\d+(\.\d+)?\s*(GB|MB))/i);
     const size = sizeMatch ? sizeMatch[0] : 'N/A';
     
     let languages = new Set(ptt.languages || []);
-    const langMatches = titleToParse.toLowerCase().matchAll(/(tam|mal|tel|hin|eng|kor)(il|ugu|alam|di|ish)?/g);
+    const langMatches = titleToParse.toLowerCase().matchAll(/(tam|mal|tel|hin|eng|kor)/g);
     for (const match of langMatches) {
         if (LANG_MAP[match[1]]) languages.add(LANG_MAP[match[1]]);
     }
@@ -86,6 +104,11 @@ function parseTitle(magnetUri) {
     };
 }
 
+/**
+ * Normalizes a show title by stripping away season, episode, year, and quality info.
+ * @param {string} title - The original thread title
+ * @returns {string} - The clean, normalized base title
+ */
 function normalizeBaseTitle(title) {
     if (!title) return '';
     const ptt = parse(title);
