@@ -8,7 +8,6 @@ const dataManager = require('../database/dataManager');
 const config = require('../utils/config');
 const logger = require('../utils/logger');
 
-// ... (fetchThreadHtml and processThread functions remain the same) ...
 async function fetchThreadHtml(url) {
     try {
         const { data } = await axios.get(url, { 
@@ -59,15 +58,15 @@ async function processThread(threadUrl) {
         }
         
         await dataManager.updateThreadTimestamp(threadUrl);
-        logger.info({ url: threadUrl, title: baseTitle, movieKey, magnets_processed: streamsAdded }, "Successfully processed thread.");
-        return { status: 'success', streamsAdded };
+        // Use a more concise log message for success
+        // logger.info({ url: threadUrl, title: baseTitle, movieKey, magnets_processed: streamsAdded }, "Successfully processed thread.");
+        return { status: 'success' };
 
     } catch (error) {
         logger.error({ err: error.message, url: threadUrl, stack: error.stack }, 'Error processing thread');
         return { status: 'error' };
     }
 }
-
 
 (async () => {
     const { threadUrl } = workerData; 
@@ -76,13 +75,11 @@ async function processThread(threadUrl) {
     if (parentPort) {
         parentPort.postMessage(result);
     }
-
-    // ---- THIS IS THE CHANGE ----
+    
     // After all work is done and the result is posted,
     // we manually trigger garbage collection before the worker exits.
     if (global.gc) {
         global.gc();
         logger.debug({ url: threadUrl }, 'Garbage collection triggered in worker.');
     }
-    // ---- END OF CHANGE ----
 })();
