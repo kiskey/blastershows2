@@ -36,8 +36,6 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          push: true # This tells the action to push the image after building
+          push: true 
           tags: |
-            # IMPORTANT: Replace 'your-image-name' with your desired image name.
-            # Example: ${{ secrets.DOCKERHUB_USERNAME }}/stremio-tamilblasters-addon:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/blastershows-addon:latest
