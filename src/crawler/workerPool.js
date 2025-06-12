@@ -4,8 +4,6 @@ const { Worker } = require('worker_threads');
 const logger = require('../utils/logger');
 const { EventEmitter } = require('events');
 
-// A high-water mark for the queue. If the queue size exceeds this, the crawler will wait.
-// 2 * numThreads is a safe default, meaning we buffer a few tasks per worker.
 const MAX_QUEUE_SIZE = 200; 
 
 class WorkerPool extends EventEmitter {
@@ -19,13 +17,7 @@ class WorkerPool extends EventEmitter {
         this.isDrained = true;
     }
 
-    /**
-     * Adds a task to the queue. Returns a Promise that resolves when the task
-     * has been successfully added. It will wait if the queue is full.
-     * @param {object} taskData - The data for the worker.
-     */
     async run(taskData) {
-        // If the queue is full, wait for the 'ready' event.
         while (this.taskQueue.length >= MAX_QUEUE_SIZE) {
             await new Promise(resolve => this.once('ready', resolve));
         }
@@ -39,13 +31,12 @@ class WorkerPool extends EventEmitter {
         while (this.taskQueue.length > 0) {
             const idleWorkerIndex = this.workers.findIndex(w => w === null);
             if (idleWorkerIndex === -1) {
-                break; // All workers are busy
+                break;
             }
 
             const taskData = this.taskQueue.shift();
             if (!taskData) continue;
 
-            // Signal that the queue has a free slot.
             this.emit('ready');
 
             this.activeTasks++;
@@ -54,7 +45,15 @@ class WorkerPool extends EventEmitter {
     }
 
     startWorker(workerIndex, taskData) {
-        const worker = new Worker(this.workerPath, { workerData: taskData });
+        // ---- THIS IS THE CHANGE ----
+        // Pass an instruction to the worker to expose the GC
+        const worker = new Worker(this.workerPath, { 
+            workerData: taskData,
+            eval: true, // Required to run initial code
+            execArgv: ['--expose-gc'] // Expose GC for this specific worker
+        });
+        // ---- END OF CHANGE ----
+        
         this.workers[workerIndex] = worker;
 
         logger.info(`Starting worker #${workerIndex} for thread: ${taskData.threadUrl}`);
@@ -64,19 +63,17 @@ class WorkerPool extends EventEmitter {
                 this.workers[workerIndex] = null;
                 this.activeTasks--;
                 
-                // A worker is free, check for more tasks
                 this.processQueue();
 
-                // If all work is done, emit the drained event
                 if (this.activeTasks === 0 && this.taskQueue.length === 0) {
                     this.isDrained = true;
                     this.emit('drained');
                 }
             }
         };
-
+        
         worker.on('message', (result) => {
-            onDone();
+             // We don't call onDone here anymore, we let 'exit' handle it
         });
 
         worker.on('error', (error) => {
