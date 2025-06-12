@@ -2,8 +2,9 @@
 
 const redis = require('./redis');
 const logger = require('../utils/logger');
+const { getTrackers } = require('../utils/trackers'); // Import the tracker utility
 
-// ... findOrCreateShow, getCatalog, getMeta functions remain the same ...
+// ... findOrCreateShow, addStream, getCatalog, getMeta functions remain the same ...
 async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
     const showKey = `show:${movieKey}`;
     const exists = await redis.exists(showKey);
@@ -30,38 +31,27 @@ async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
     };
 }
 
-
-/**
- * Adds a parsed stream to the corresponding show. Handles multi-episode torrents correctly.
- * @param {string} movieKey - The unique show ID
- * @param {Object} streamInfo - Parsed stream data from titleParser
- */
 async function addStream(movieKey, streamInfo) {
-    // ---- START OF NEW LOGIC ----
     const { infoHash, name, resolution, languages, size, episodes } = streamInfo;
-    const season = streamInfo.season || 1;
+    const season = streamInfo.season || 1; 
 
-    // Determine if this is a single episode or a pack
     const isPack = episodes.length > 1;
     const singleEpisode = episodes.length === 1 ? episodes[0] : null;
 
     if (episodes.length === 0) {
-        logger.warn({ movieKey, name }, "Could not add stream: No episode information found.");
-        return; // Do not add a stream if no episodes could be parsed.
+        logger.warn({ movieKey, name }, "Could not add stream: No episode information found in torrent title.");
+        return;
     }
 
-    // Create a unique ID. For packs, just use the season. For single eps, use the episode number.
     const streamIdSuffix = isPack ? `s${season}-pack` : `s${season}e${singleEpisode}`;
     const streamId = `${infoHash}:${streamIdSuffix}:${resolution}`;
-
     const streamKey = `stream:${movieKey}`;
 
-    // Store all relevant info, including the episode array for packs.
     const streamData = JSON.stringify({
         id: streamId,
         infoHash,
         season,
-        episodes, // Store the full array [1, 2, 3...] or [7]
+        episodes,
         isPack,
         title: name,
         resolution,
@@ -71,9 +61,7 @@ async function addStream(movieKey, streamInfo) {
 
     await redis.hset(streamKey, streamId, streamData);
     logger.debug({ movieKey, streamId, isPack }, 'Added/updated stream.');
-    // ---- END OF NEW LOGIC ----
 }
-
 
 async function getCatalog() {
     const keys = await redis.keys('show:*');
@@ -116,52 +104,81 @@ async function getMeta(movieKey) {
     };
 }
 
+
 async function getStreams(movieKey) {
     const streamData = await redis.hvals(`stream:${movieKey}`);
     if (!streamData.length) return [];
+    
+    // ---- START OF ENHANCEMENTS ----
+    const bestTrackers = getTrackers();
+    const trackerString = bestTrackers.map(t => `tr=${encodeURIComponent(t)}`).join('&');
+    // ---- END OF ENHANCEMENTS ----
 
     const streams = streamData.map(data => {
         const parsed = JSON.parse(data);
-        const langString = parsed.languages.join('+');
+        const langString = parsed.languages.join(' / ');
         const seasonNum = String(parsed.season).padStart(2, '0');
 
-        let streamName, streamTitle;
+        let streamName, streamDescription;
 
-        // ---- START OF NEW LOGIC ----
         if (parsed.isPack) {
-            // It's a pack of multiple episodes
             const startEp = String(parsed.episodes[0]).padStart(2, '0');
             const endEp = String(parsed.episodes[parsed.episodes.length - 1]).padStart(2, '0');
-            streamName = `${parsed.resolution} - S${seasonNum} E${startEp}-E${endEp} Pack`;
-            streamTitle = `Season ${seasonNum} Pack - ${langString}\n${parsed.size || ''}`;
+            streamName = `[${parsed.resolution}] S${seasonNum} E${startEp}-E${endEp} Pack`;
+            streamDescription = `📺 Season ${seasonNum} Pack\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         } else {
-            // It's a single episode
             const episodeNum = String(parsed.episodes[0]).padStart(2, '0');
-            streamName = `${parsed.resolution} - S${seasonNum}E${episodeNum}`;
-            streamTitle = `S${seasonNum}E${episodeNum} - ${langString}\n${parsed.size || ''}`;
+            streamName = `[${parsed.resolution}] S${seasonNum}E${episodeNum}`;
+            streamDescription = `📺 S${seasonNum}E${episodeNum}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         }
-        // ---- END OF NEW LOGIC ----
-
+        
+        // ---- START OF ENHANCEMENTS ----
+        // Convert size string (e.g., "3.3GB") to bytes for videoSize hint
+        let videoSizeBytes = 0;
+        if (parsed.size) {
+            const sizeMatch = parsed.size.match(/(\d+(\.\d+)?)\s*(GB|MB)/i);
+            if (sizeMatch) {
+                const sizeValue = parseFloat(sizeMatch[1]);
+                const sizeUnit = sizeMatch[3].toUpperCase();
+                if (sizeUnit === 'GB') {
+                    videoSizeBytes = sizeValue * 1024 * 1024 * 1024;
+                } else if (sizeUnit === 'MB') {
+                    videoSizeBytes = sizeValue * 1024 * 1024;
+                }
+            }
+        }
+        
         return {
             name: streamName,
-            title: streamTitle,
+            description: streamDescription, // Use 'description' instead of 'title'
             infoHash: parsed.infoHash,
-            url: `magnet:?xt=urn:btih:${parsed.infoHash}&dn=${encodeURIComponent(parsed.title)}`
+            sources: bestTrackers, // Add the list of trackers
+            // The 'url' property is not needed when infoHash is present, but sources can be added.
+            // Stremio will construct the magnet link.
+
+            behaviorHints: {
+                // This helps Stremio auto-select the next episode from the same addon/quality
+                bingeGroup: `tamilblasters-${parsed.resolution}`,
+                // Provide videoSize if available to help subtitle addons
+                videoSize: videoSizeBytes > 0 ? videoSizeBytes : undefined, 
+            }
         };
+        // ---- END OF ENHANCEMENTS ----
     });
 
-    // Sorting logic remains the same and will handle packs correctly
+    // Sort streams: Higher resolution first, then by season, then by episode number
     streams.sort((a, b) => {
         const resA = parseInt(a.name.match(/\d{3,4}/)?.[0] || 0);
         const resB = parseInt(b.name.match(/\d{3,4}/)?.[0] || 0);
         if (resB !== resA) return resB - resA;
 
-        const seasonA = parseInt(a.title.match(/S(\d+)/)?.[1] || 0);
-        const seasonB = parseInt(b.title.match(/S(\d+)/)?.[1] || 0);
+        // The description field now holds the S/E info reliably
+        const seasonA = parseInt(a.description.match(/S(\d+)/)?.[1] || a.description.match(/Season (\d+)/)?.[1] || 0);
+        const seasonB = parseInt(b.description.match(/S(\d+)/)?.[1] || b.description.match(/Season (\d+)/)?.[1] || 0);
         if (seasonA !== seasonB) return seasonA - seasonB;
         
-        const episodeA = parseInt(a.title.match(/E(\d+)/)?.[1] || 0);
-        const episodeB = parseInt(b.title.match(/E(\d+)/)?.[1] || 0);
+        const episodeA = parseInt(a.description.match(/E(\d+)/)?.[1] || 0);
+        const episodeB = parseInt(b.description.match(/E(\d+)/)?.[1] || 0);
         return episodeA - episodeB;
     });
 
