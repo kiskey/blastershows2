@@ -4,7 +4,6 @@ const redis = require('./redis');
 const logger = require('../utils/logger');
 const { getTrackers } = require('../utils/trackers');
 
-// ... findOrCreateShow, getCatalog, getMeta are unchanged ...
 async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
     const showKey = `show:${movieKey}`;
     const exists = await redis.exists(showKey);
@@ -22,18 +21,17 @@ async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
     }
 }
 
-
 async function addStream(movieKey, streamInfo) {
-    const { infoHash, name, resolution, languages, size, episodes } = streamInfo;
-    
-    // ** THIS IS THE CRITICAL FIX **
-    // If we couldn't parse any episodes OR a season, we cannot process this stream.
-    if (!streamInfo.season && episodes.length === 0) {
-        logger.warn({ movieKey, name }, "Could not add stream: No season or episode info found.");
+    const { infoHash, name, resolution, languages, size, episodes, season: parsedSeason } = streamInfo;
+
+    // A stream is valid if it has a season OR at least one episode.
+    // This correctly handles "Season Packs" that have no episode numbers.
+    if (!parsedSeason && episodes.length === 0) {
+        logger.warn({ movieKey, name }, "Could not add stream: No season or episode info could be parsed.");
         return;
     }
 
-    const season = streamInfo.season || 1; // Default to season 1 if only episodes are found
+    const season = parsedSeason || 1; // Default to season 1 if only episodes are found
     const isEpisodePack = episodes.length > 1;
     const isSeasonPack = episodes.length === 0;
 
@@ -58,7 +56,6 @@ async function addStream(movieKey, streamInfo) {
     await redis.hset(streamKey, streamId, streamData);
     logger.debug({ movieKey, streamId }, 'Added/updated stream.');
 }
-
 
 async function getCatalog() {
     const keys = await redis.keys('show:*');
@@ -217,7 +214,6 @@ async function getThreadsToRevisit() {
 
     return threadsToRevisit;
 }
-
 
 module.exports = {
     findOrCreateShow,
