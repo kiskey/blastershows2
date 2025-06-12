@@ -38,21 +38,17 @@ class WorkerPool extends EventEmitter {
             if (!taskData) continue;
 
             this.emit('ready');
-
             this.activeTasks++;
             this.startWorker(idleWorkerIndex, taskData);
         }
     }
 
     startWorker(workerIndex, taskData) {
-        // ---- THIS IS THE CHANGE ----
-        // Pass an instruction to the worker to expose the GC
+        // This is now the simple, correct way to create a worker.
+        // It will inherit the --expose-gc flag from the main process.
         const worker = new Worker(this.workerPath, { 
-            workerData: taskData,
-            eval: true, // Required to run initial code
-            execArgv: ['--expose-gc'] // Expose GC for this specific worker
+            workerData: taskData
         });
-        // ---- END OF CHANGE ----
         
         this.workers[workerIndex] = worker;
 
@@ -71,20 +67,20 @@ class WorkerPool extends EventEmitter {
                 }
             }
         };
-        
-        worker.on('message', (result) => {
-             // We don't call onDone here anymore, we let 'exit' handle it
+
+        worker.on('message', () => {
+            // Let 'exit' handle the onDone call to ensure it's always called.
         });
 
         worker.on('error', (error) => {
             logger.error({ err: error, url: taskData.threadUrl }, `Worker #${workerIndex} encountered an error`);
-            onDone();
         });
 
         worker.on('exit', (code) => {
             if (code !== 0) {
                 logger.warn(`Worker #${workerIndex} for ${taskData.threadUrl} stopped with exit code ${code}`);
             }
+            // onDone() is the single point of cleanup and continuation.
             onDone();
         });
     }
