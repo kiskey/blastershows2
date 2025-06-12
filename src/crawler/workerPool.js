@@ -2,86 +2,97 @@
 
 const { Worker } = require('worker_threads');
 const logger = require('../utils/logger');
+const { EventEmitter } = require('events');
 
-class WorkerPool {
+class WorkerPool extends EventEmitter {
     constructor(numThreads, workerPath) {
+        super();
         this.numThreads = numThreads;
         this.workerPath = workerPath;
         this.workers = new Array(numThreads).fill(null);
         this.taskQueue = [];
-    }
+        this.activeTasks = 0;
 
-    /**
-     * Adds a task to the queue and returns a Promise that resolves/rejects when the task is done.
-     * @param {object} taskData - The data for the worker.
-     * @returns {Promise<any>}
-     */
-    run(taskData) {
-        return new Promise((resolve, reject) => {
-            this.taskQueue.push({ data: taskData, resolve, reject, isSettled: false });
-            this.processQueue();
+        // Listen for internal event when a task is done
+        this.on('task_done', () => {
+            this.activeTasks--;
+            // If all queues and active workers are done, emit a 'drained' event
+            if (this.activeTasks === 0 && this.taskQueue.length === 0) {
+                this.emit('drained');
+            }
         });
     }
 
     /**
-     * The core loop. It checks for idle workers and available tasks,
-     * and starts as many workers as possible.
+     * Adds a task to the queue and immediately tries to process it.
+     * This is now a "fire-and-forget" method.
+     * @param {object} taskData - The data for the worker.
      */
+    run(taskData) {
+        this.taskQueue.push(taskData);
+        this.processQueue();
+    }
+
     processQueue() {
         while (this.taskQueue.length > 0) {
-            const idleWorkerIndex = this.workers.findIndex(worker => worker === null);
+            const idleWorkerIndex = this.workers.findIndex(w => w === null);
             if (idleWorkerIndex === -1) {
                 break; // All workers are busy
             }
 
-            const task = this.taskQueue.shift();
-            if (!task) continue;
+            const taskData = this.taskQueue.shift();
+            if (!taskData) continue;
 
-            this.workers[idleWorkerIndex] = 'busy'; // Placeholder
-            this.startWorker(idleWorkerIndex, task);
+            this.activeTasks++;
+            this.startWorker(idleWorkerIndex, taskData);
         }
     }
 
-    /**
-     * Starts a new worker for a given task and handles its lifecycle events.
-     * @param {number} workerIndex - The slot index for the new worker.
-     * @param {object} task - The task object containing data and promise handlers.
-     */
-    startWorker(workerIndex, task) {
-        const worker = new Worker(this.workerPath, { workerData: task.data });
+    startWorker(workerIndex, taskData) {
+        const worker = new Worker(this.workerPath, { workerData: taskData });
         this.workers[workerIndex] = worker;
-        
-        logger.info(`Starting worker #${workerIndex} for thread: ${task.data.threadUrl}`);
 
-        const handleResult = (handler, result) => {
-            if (!task.isSettled) {
-                task.isSettled = true;
-                handler(result);
+        logger.info(`Starting worker #${workerIndex} for thread: ${taskData.threadUrl}`);
+
+        const onDone = () => {
+            // This ensures we only handle completion once
+            if (this.workers[workerIndex] !== null) {
+                this.workers[workerIndex] = null;
+                this.emit('task_done');
+                this.processQueue(); // A worker is free, check for more tasks
             }
         };
 
         worker.on('message', (result) => {
-            handleResult(task.resolve, result);
+            logger.info(`Worker #${workerIndex} finished task for ${taskData.threadUrl} with status: ${result.status}`);
+            onDone();
         });
 
         worker.on('error', (error) => {
-            logger.error({ err: error, url: task.data.threadUrl }, `Worker #${workerIndex} encountered a critical error`);
-            handleResult(task.reject, error);
+            logger.error({ err: error, url: taskData.threadUrl }, `Worker #${workerIndex} encountered an error`);
+            onDone();
         });
 
         worker.on('exit', (code) => {
             if (code !== 0) {
-                logger.warn(`Worker #${workerIndex} for ${task.data.threadUrl} stopped with exit code ${code}`);
-                // Only reject if the promise hasn't been settled yet (e.g., worker crashed before sending a message)
-                handleResult(task.reject, new Error(`Worker stopped unexpectedly with exit code ${code}`));
+                logger.warn(`Worker #${workerIndex} for ${taskData.threadUrl} stopped with exit code ${code}`);
             }
-            
-            // This worker slot is now free.
-            this.workers[workerIndex] = null;
-            
-            // IMPORTANT: A worker has finished. We must re-run the main loop
-            // to check for more tasks waiting in the queue.
-            this.processQueue();
+            // The 'message' or 'error' event should have already called onDone,
+            // but this is a safeguard to ensure the slot is always freed.
+            onDone();
+        });
+    }
+
+    /**
+     * Returns a promise that resolves when all tasks in the queue have been processed.
+     */
+    onDrained() {
+        return new Promise(resolve => {
+            if (this.activeTasks === 0 && this.taskQueue.length === 0) {
+                resolve();
+            } else {
+                this.once('drained', resolve);
+            }
         });
     }
 }
