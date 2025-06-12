@@ -20,4 +20,4 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
 EXPOSE 7000
-CMD ["node", "src/index.js"]
+CMD ["node", "--expose-gc", "src/index.js"]
