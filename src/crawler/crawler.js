@@ -84,7 +84,7 @@ async function runCrawler(isInitial = false) {
     }
     
     logger.info(`Crawler page discovery finished. Total threads queued: ${totalThreadsFound}. Waiting for all workers to complete...`);
-    // Use the new, simpler wait() method.
+    // Use the simpler wait() method.
     await workerPool.wait();
     logger.info('All worker tasks have been completed. Crawler run is fully finished.');
 }
@@ -122,7 +122,9 @@ function scheduleCrawls() {
         }
     }, config.CRAWL_INTERVAL * 1000);
 
-    setInterval(async ().
+    // ---- THIS IS THE FIX ----
+    setInterval(async () => {
+    // ---- END OF FIX ----
         if (isRevisitingOld) {
             logger.warn('Old thread revisit is already in progress. Skipping this interval.');
             return;
