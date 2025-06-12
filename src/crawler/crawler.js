@@ -5,23 +5,40 @@ const logger = require('../utils/logger');
 const WorkerPool = require('./workerPool');
 const dataManager = require('../database/dataManager');
 
+// The worker path is relative to the project root
 const workerPool = new WorkerPool(config.MAX_CONCURRENCY, './src/workers/threadProcessor.js');
 
-async function getValidUrl(url) {
-    try {
-        const response = await axios.get(config.DOMAIN_MONITOR, {
-            maxRedirects: 5,
-            timeout: 5000,
-            headers: { 'User-Agent': config.USER_AGENT }
-        });
-        const finalUrl = response.request.res.responseUrl;
-        const domain = new URL(finalUrl).origin;
-        logger.info(`Master domain resolved to: ${domain}`);
-        return url.replace(new URL(config.FORUM_URL).origin, domain);
-    } catch (error) {
-        logger.error({ err: error.message }, 'Failed to resolve master domain. Using default FORUM_URL.');
-        return config.FORUM_URL;
+// ... (getValidUrl function remains the same) ...
+
+async function runCrawler(isInitial = false) {
+    logger.info('Crawler run starting...');
+    const baseUrl = await getValidUrl(config.FORUM_URL);
+    const maxPages = isInitial && config.INITIAL_PAGES > 0 ? config.INITIAL_PAGES : Infinity;
+
+    for (let i = 1; i <= maxPages; i++) {
+        const pageUrl = `${baseUrl}page/${i}/`;
+        logger.info(`Crawling page: ${pageUrl}`);
+        
+        const html = await fetchPage(pageUrl);
+        if (!html) {
+            logger.info('Reached the end of pagination.');
+            break;
+        }
+
+        const threadUrls = parseThreadLinks(html);
+        logger.info(`Found ${threadUrls.length} threads on page ${i}. Dispatching to worker pool...`);
+
+        // Use Promise.all to dispatch all tasks and wait for them to be queued.
+        // The worker pool will process them concurrently in the background.
+        const tasks = threadUrls.map(threadUrl => workerPool.run({ threadUrl }));
+        await Promise.all(tasks);
+
+        logger.info(`All ${threadUrls.length} threads from page ${i} have been queued for processing.`);
+
+        // Throttle requests between pages
+        await new Promise(resolve => setTimeout(resolve, 500)); 
     }
+    logger.info('Crawler page discovery finished. Workers are processing in the background.');
 }
 
 async function fetchPage(url) {
