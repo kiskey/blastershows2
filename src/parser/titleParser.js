@@ -4,16 +4,22 @@ const { parse } = require('parse-torrent-title');
 const logger = require('../utils/logger');
 
 const BTIH_REGEX = /btih:([a-fA-F0-9]{40})/;
-const LANG_MAP = { /* ... no change ... */ };
 
-// --- A more comprehensive and organized set of regexes ---
+const LANG_MAP = {
+    tam: 'ta', mal: 'ml', tel: 'te', hin: 'hi', eng: 'en', kor: 'ko', jap: 'ja',
+    tamil: 'ta', malayalam: 'ml', telugu: 'te', hindi: 'hi', english: 'en', korean: 'ko', japanese: 'ja', chi: 'zh'
+};
+
+// A more comprehensive and organized set of regexes, ordered by specificity
 const EPISODE_PACK_REGEX = [
-    /S(\d{1,2})\s?EP?\(?(\d{1,2})[-‑](\d{1,2})\)?/i, // S01EP(01-09), S01E01-09, S01(01-09)
-    /S(\d{1,2})\s?(\d{1,2})[-‑](\d{1,2})/i,             // S01 01-24 (no E)
+    /S(\d{1,2})\s?EP\((\d{1,2})[-‑](\d{1,2})\)/i,      // S01EP(01-09) or S01 EP(01-09)
+    /S(\d{1,2})\s?E(\d{1,2})[-‑]E?(\d{1,2})/i,         // S01 E01-E09 or S01E01-E09
+    /S(\d{1,2})EP(\d{1,2})[-‑](\d{1,2})/i,              // S01EP01-04 (no space, no parens)
+    /S(\d{1,2})\s?\((\d{1,2})[-‑](\d{1,2})\)/i,          // S01 (01-24)
 ];
 const SINGLE_EPISODE_REGEX = [
-    /S(\d{1,2})\s?EP\(?(\d{1,2})\)?/i, // S01EP(01), S01 E01
-    /S(\d{1,2})EP(\d{1,2})/i,         // S01EP01 (no space)
+    /S(\d{1,2})\s?EP\(?(\d{1,2})\)?/i,                 // S01 EP(06) or S01 E06
+    /S(\d{1,2})EP(\d{1,2})/i,                         // S02EP04 (no space)
 ];
 
 function parseTitle(magnetUri) {
@@ -54,7 +60,7 @@ function parseTitle(magnetUri) {
             if (match) {
                 season = parseInt(match[1], 10);
                 const ep = parseInt(match[2], 10);
-                 if (!isNaN(ep)) {
+                if (!isNaN(ep)) {
                     episodes = [ep];
                 }
                 break;
@@ -69,14 +75,22 @@ function parseTitle(magnetUri) {
     const finalLanguages = getLanguages(titleToParse, ptt.languages);
 
     return {
-        infoHash, name: titleToParse.replace(/\s+/g, ' ').trim(), title: ptt.title,
-        year: ptt.year, season, episodes, resolution, languages: finalLanguages, size
+        infoHash,
+        name: titleToParse.replace(/\s+/g, ' ').trim(),
+        title: ptt.title,
+        year: ptt.year,
+        season,
+        episodes,
+        resolution,
+        languages: finalLanguages,
+        size
     };
 }
 
 function getLanguages(title, pttLangs = []) {
     let languages = new Set(pttLangs);
-    const langMatches = title.toLowerCase().matchAll(/(tam|mal|tel|hin|eng|kor|jap)/g);
+    // Add 'chi' for Chinese to the map
+    const langMatches = title.toLowerCase().matchAll(/(tam|mal|tel|hin|eng|kor|jap|chi)/g);
     for (const match of langMatches) {
         if (LANG_MAP[match[1]]) languages.add(LANG_MAP[match[1]]);
     }
@@ -91,7 +105,6 @@ function getLanguages(title, pttLangs = []) {
     return languages.size > 0 ? Array.from(languages) : ['en'];
 }
 
-// ... normalizeBaseTitle is unchanged ...
 function normalizeBaseTitle(title) {
     if (!title) return '';
     const ptt = parse(title);
