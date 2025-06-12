@@ -4,7 +4,6 @@ const redis = require('./redis');
 const logger = require('../utils/logger');
 const { getTrackers } = require('../utils/trackers');
 
-// ... No changes to findOrCreateShow, addStream ...
 async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
     const showKey = `show:${movieKey}`;
     const exists = await redis.exists(showKey);
@@ -13,7 +12,6 @@ async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
         await redis.hset(showKey, {
             originalTitle,
             posterUrl,
-            // Store the year, which can be null
             year: year || '', 
             createdAt: new Date().toISOString()
         });
@@ -24,7 +22,6 @@ async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
     
     const pttTitleMatch = originalTitle.match(/^([^[(]+)/);
     const cleanName = pttTitleMatch ? pttTitleMatch[1].trim() : originalTitle;
-
     const nameWithYear = year ? `${cleanName} (${year})` : cleanName;
 
     return {
@@ -48,11 +45,13 @@ async function addStream(movieKey, streamInfo) {
     const isEpisodePack = episodes.length > 1;
     const isSeasonPack = episodes.length === 0;
 
+    // Make the streamId suffix highly unique for packs to avoid any potential collisions
     let streamIdSuffix;
     if (isSeasonPack) {
-        streamIdSuffix = `s${season}-season-pack`;
+        streamIdSuffix = `s${season}-seasonpack`;
     } else if (isEpisodePack) {
-        streamIdSuffix = `s${season}-ep-pack`;
+        // Include the episode range in the ID to guarantee uniqueness, e.g., s1-ep1-4
+        streamIdSuffix = `s${season}-ep${episodes[0]}-${episodes[episodes.length - 1]}`;
     } else {
         streamIdSuffix = `s${season}e${episodes[0]}`;
     }
@@ -70,8 +69,6 @@ async function addStream(movieKey, streamInfo) {
     logger.debug({ movieKey, streamId, isSeasonPack, isEpisodePack }, 'Added/updated stream.');
 }
 
-
-// --- `getCatalog` is now enhanced with sorting ---
 async function getCatalog() {
     const keys = await redis.keys('show:*');
     if (!keys.length) return [];
@@ -85,58 +82,39 @@ async function getCatalog() {
         
         const pttTitleMatch = data.originalTitle.match(/^([^[(]+)/);
         const cleanName = pttTitleMatch ? pttTitleMatch[1].trim() : data.originalTitle;
-
         const nameWithYear = data.year ? `${cleanName} (${data.year})` : cleanName;
 
         return {
-            id: keys[index].substring(5), // remove 'show:' prefix
+            id: keys[index].substring(5),
             type: 'movie',
             name: nameWithYear,
             poster: data.posterUrl,
-            // Add year as a sortable property
             year: data.year ? parseInt(data.year, 10) : null 
         };
-    }).filter(Boolean); // Filter out any null entries
+    }).filter(Boolean);
 
-    // --- START OF NEW SORTING LOGIC ---
     metas.sort((a, b) => {
         const yearA = a.year;
         const yearB = b.year;
         const nameA = a.name.toLowerCase();
         const nameB = b.name.toLowerCase();
 
-        // Rule 1: One has a year, the other doesn't. No-year item comes first.
-        if (yearA && !yearB) {
-            return 1; // a comes after b
-        }
-        if (!yearA && yearB) {
-            return -1; // a comes before b
-        }
-
-        // Rule 2: Both have no year. Sort alphabetically.
+        if (yearA && !yearB) return 1;
+        if (!yearA && yearB) return -1;
         if (!yearA && !yearB) {
             if (nameA < nameB) return -1;
             if (nameA > nameB) return 1;
             return 0;
         }
-
-        // Rule 3: Both have a year. Sort by year descending (latest first).
-        if (yearA !== yearB) {
-            return yearB - yearA;
-        }
-
-        // Rule 4: Same year. Sort alphabetically.
+        if (yearA !== yearB) return yearB - yearA;
         if (nameA < nameB) return -1;
         if (nameA > nameB) return 1;
-        
         return 0;
     });
-    // --- END OF NEW SORTING LOGIC ---
 
     return metas;
 }
 
-// ... No changes to getMeta, getStreams, updateThreadTimestamp, getThreadsToRevisit ...
 async function getMeta(movieKey) {
     const showData = await redis.hgetall(`show:${movieKey}`);
     if (!showData.originalTitle) return null;
@@ -144,7 +122,6 @@ async function getMeta(movieKey) {
     const pttTitleMatch = showData.originalTitle.match(/^([^[(]+)/);
     const cleanName = pttTitleMatch ? pttTitleMatch[1].trim() : showData.originalTitle;
     const description = showData.year ? `Title: ${cleanName}\nYear: ${showData.year}` : `Title: ${cleanName}`;
-
     const nameWithYear = showData.year ? `${cleanName} (${showData.year})` : cleanName;
 
     return {
@@ -249,6 +226,7 @@ async function getThreadsToRevisit() {
 
     return threadsToRevisit;
 }
+
 
 module.exports = {
     findOrCreateShow,
