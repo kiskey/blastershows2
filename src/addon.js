@@ -1,8 +1,11 @@
+// src/addon.js
+
 const express = require('express');
 const cors = require('cors');
 const dataManager = require('./database/dataManager');
 const config = require('./utils/config');
 const logger = require('./utils/logger');
+const redis = require('./database/redis'); // Import redis client for debug
 
 const app = express();
 app.use(cors());
@@ -13,11 +16,11 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
     id: 'tamilblasters.webseries.addon',
-    version: '1.0.0',
+    version: '1.0.1', // Incremented version
     name: 'TamilBlasters Web Series',
     description: 'Provides Web Series and TV Shows from the 1TamilBlasters forum. This is a custom solution where all content is treated as movies.',
     resources: ['catalog', 'meta', 'stream'],
-    types: ['movie'], // As per requirement, we use 'movie' type
+    types: ['movie'],
     catalogs: [
         {
             type: 'movie',
@@ -25,7 +28,7 @@ const MANIFEST = {
             name: 'TamilBlasters Series',
         },
     ],
-    idPrefixes: ['tbs-'], // Custom ID prefix
+    idPrefixes: ['tbs-'],
 };
 
 app.get('/manifest.json', (req, res) => {
@@ -64,6 +67,51 @@ app.get('/stream/movie/:id.json', async (req, res) => {
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
+
+// ---- START OF NEW DEBUG ENDPOINT ----
+app.get('/debug/redis/:key', async (req, res) => {
+    if (config.NODE_ENV !== 'development') {
+        return res.status(403).send('Forbidden in production environment');
+    }
+    const { key } = req.params;
+    logger.info({ key }, 'Redis debug request');
+    
+    try {
+        const type = await redis.type(key);
+        let data;
+
+        switch (type) {
+            case 'hash':
+                data = await redis.hgetall(key);
+                break;
+            case 'string':
+                data = await redis.get(key);
+                break;
+            case 'none':
+                return res.status(404).json({ error: 'Key not found' });
+            default:
+                return res.status(400).json({ error: `Unsupported key type: ${type}` });
+        }
+        
+        // If data is a hash with JSON strings, parse them for readability
+        if (type === 'hash') {
+            for (const field in data) {
+                try {
+                    data[field] = JSON.parse(data[field]);
+                } catch (e) {
+                    // Not a JSON string, leave as is
+                }
+            }
+        }
+        
+        res.json({ key, type, data });
+
+    } catch (error) {
+        logger.error({ err: error, key }, 'Error during redis debug');
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+// ---- END OF NEW DEBUG ENDPOINT ----
 
 function startServer() {
     const port = config.PORT;
