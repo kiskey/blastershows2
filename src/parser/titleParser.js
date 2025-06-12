@@ -9,11 +9,24 @@ const LANG_MAP = {
     tamil: 'ta', malayalam: 'ml', telugu: 'te', hindi: 'hi', english: 'en', korean: 'ko', japanese: 'ja', chi: 'zh'
 };
 
-// A comprehensive set of regexes for packs. They are designed to be very specific.
-const PACK_REGEX_PATTERNS = [
-    /S(\d{1,2})\s?EP?\(?(\d{1,2})[-‑](\d{1,2})\)?/i,      // S01EP(01-09), S01E01-09, S01(01-09), S01(E01-26)
-    /S(\d{1,2})\s?(\d{1,2})[-‑](\d{1,2})/i,             // S01 01-24 (no E)
-    /S(\d{1,2})EP(\d{1,2})[-‑](\d{1,2})/i,              // S01EP01-04 (no space, no parens)
+// --- THE MASTER REGEX LIST ---
+// Ordered from most specific (packs) to least specific (season only)
+const PARSING_PATTERNS = [
+    // Case 1: Episode Packs (e.g., S01 E01-E09, S01EP(01-09), S01(E01-26), S01 (01-16))
+    {
+        regex: /S(\d{1,2})\s?(?:E|EP)?\(?(\d{1,2})[-‑](\d{1,2})\)?/i,
+        type: 'EPISODE_PACK'
+    },
+    // Case 2: Single Episodes (e.g., S01 E01, S02EP(04))
+    {
+        regex: /S(\d{1,2})\s?(?:E|EP)\(?(?!\d+[-‑])(\d{1,2})\)?/i,
+        type: 'SINGLE_EPISODE'
+    },
+    // Case 3: Season Packs (e.g., S01, S1, S2, Season 01)
+    {
+        regex: /(?:S|Season)\s*(\d{1,2})/i,
+        type: 'SEASON_PACK'
+    }
 ];
 
 function parseTitle(magnetUri) {
@@ -25,51 +38,51 @@ function parseTitle(magnetUri) {
     const titleToParse = dnMatch ? decodeURIComponent(dnMatch[1]).replace(/\+/g, ' ') : '';
     if (!titleToParse) return null;
 
-    // --- START OF NEW, SIMPLIFIED LOGIC ---
-
-    // 1. Get a baseline parse from the library. This is our primary source of truth.
+    // Use ptt for non-essential metadata first
     const ptt = parse(titleToParse);
-    let season = ptt.season;
-    let episodes = ptt.episode ? [ptt.episode] : [];
 
-    // 2. Check if this is a pack, which our regexes are better at.
-    // If a pack regex matches, we overwrite the library's episode result.
-    for (const regex of PACK_REGEX_PATTERNS) {
-        const match = titleToParse.match(regex);
+    let season = null;
+    let episodes = [];
+
+    // --- START OF NEW PARSING LOGIC ---
+    // Loop through our master list of patterns. First match wins.
+    for (const pattern of PARSING_PATTERNS) {
+        const match = titleToParse.match(pattern.regex);
         if (match) {
-            // The regex found a pack, so we trust its season and episode range.
-            season = parseInt(match[1], 10);
-            const startEp = parseInt(match[2], 10);
-            const endEp = parseInt(match[3], 10);
-            
-            if (!isNaN(startEp) && !isNaN(endEp)) {
-                episodes = []; // Clear any single episode found by ptt
-                for (let i = startEp; i <= endEp; i++) {
-                    episodes.push(i);
+            if (pattern.type === 'EPISODE_PACK') {
+                season = parseInt(match[1], 10);
+                const startEp = parseInt(match[2], 10);
+                const endEp = parseInt(match[3], 10);
+                if (!isNaN(startEp) && !isNaN(endEp)) {
+                    for (let i = startEp; i <= endEp; i++) { episodes.push(i); }
                 }
-                // We found a pack, so we can stop.
+            } else if (pattern.type === 'SINGLE_EPISODE') {
+                season = parseInt(match[1], 10);
+                const ep = parseInt(match[2], 10);
+                if (!isNaN(ep)) {
+                    episodes.push(ep);
+                }
+            } else if (pattern.type === 'SEASON_PACK') {
+                season = parseInt(match[1], 10);
+                // episodes array remains empty for a season pack
+            }
+            
+            // If we got a valid season, we're done.
+            if (season) {
                 break;
             }
         }
     }
-    // --- END OF NEW, SIMPLIFIED LOGIC ---
+    // --- END OF NEW PARSING LOGIC ---
 
-    // --- Other metadata parsing (remains the same) ---
     const resolution = ptt.resolution || 'N/A';
     const sizeMatch = titleToParse.match(/(\d+(\.\d+)?\s*(GB|MB))/i);
     const size = sizeMatch ? sizeMatch[0] : 'N/A';
     const finalLanguages = getLanguages(titleToParse, ptt.languages);
 
     return {
-        infoHash,
-        name: titleToParse.replace(/\s+/g, ' ').trim(),
-        title: ptt.title,
-        year: ptt.year,
-        season, // This will be the season from ptt, or overwritten by our regex
-        episodes, // This will be the episode from ptt, or the full range from our regex
-        resolution,
-        languages: finalLanguages,
-        size
+        infoHash, name: titleToParse.replace(/\s+/g, ' ').trim(), title: ptt.title,
+        year: ptt.year, season, episodes, resolution, languages: finalLanguages, size
     };
 }
 
