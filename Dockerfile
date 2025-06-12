@@ -1,4 +1,4 @@
-# ---- Base Stage ----
+# ---- Base Stage -----
 FROM node:18-alpine AS base
 WORKDIR /usr/src/app
 RUN apk add --no-cache libc6-compat
