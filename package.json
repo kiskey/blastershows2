@@ -19,6 +19,7 @@
     "ioredis": "^5.4.1",
     "jsdom": "^24.0.0",
     "natural": "^7.0.5",
+    "parse-torrent-title": "^2.0.2",
     "pino": "^9.1.0",
     "pino-pretty": "^11.0.0",
     "stremio-addon-sdk": "^1.6.10"
