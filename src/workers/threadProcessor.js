@@ -1,6 +1,6 @@
 // src/workers/threadProcessor.js
 
-const { workerData, parentPort } = require('worker_threads');
+const { parentPort } = require('worker_threads');
 const axios = require('axios');
 const { parseThreadPage } = require('../parser/htmlParser');
 const { parseTitle, normalizeBaseTitle } = require('../parser/titleParser');
@@ -8,11 +8,7 @@ const dataManager = require('../database/dataManager');
 const config = require('../utils/config');
 const logger = require('../utils/logger');
 
-/**
- * Fetches the HTML content of a given thread URL.
- * @param {string} url - The URL of the thread to fetch.
- * @returns {Promise<string|null>} The HTML content or null on failure.
- */
+// --- Helper Functions (remain the same) ---
 async function fetchThreadHtml(url) {
     try {
         const { data } = await axios.get(url, {
@@ -28,11 +24,6 @@ async function fetchThreadHtml(url) {
     }
 }
 
-/**
- * The main processing function for a single thread.
- * It fetches, parses, and stores data in Redis.
- * @param {string} threadUrl - The URL of the forum thread.
- */
 async function processThread(threadUrl) {
     try {
         const html = await fetchThreadHtml(threadUrl);
@@ -46,9 +37,6 @@ async function processThread(threadUrl) {
 
         const baseTitle = normalizeBaseTitle(threadData.title);
         const yearMatch = threadData.title.match(/\b(19|20)\d{2}\b/);
-        
-        // Use 'nya' (No Year Available) as a placeholder if year is not found.
-        // This makes the movieKey consistent and sortable.
         const year = yearMatch ? yearMatch[0] : 'nya';
 
         if (!baseTitle) {
@@ -57,8 +45,6 @@ async function processThread(threadUrl) {
         }
 
         const movieKey = `tbs-${baseTitle.replace(/\s+/g, '-')}-${year}`;
-
-        // Pass the original year (or null if not found) to the dataManager for storage.
         const originalYear = year === 'nya' ? null : year;
         await dataManager.findOrCreateShow(movieKey, threadData.title, threadData.posterUrl, originalYear);
 
@@ -70,27 +56,35 @@ async function processThread(threadUrl) {
         }
 
         await dataManager.updateThreadTimestamp(threadUrl);
-
     } catch (error) {
         logger.error({ err: error.message, url: threadUrl, stack: error.stack }, 'Error processing thread');
     }
 }
 
-// This is the self-executing block that runs when the file is loaded as a worker.
-(async () => {
-    const { url } = workerData;
-    if (url) {
-        await processThread(url);
-    }
+// --- THIS IS THE CORRECTED MAIN WORKER LOGIC ---
+if (!parentPort) {
+    // Should not happen in production, but good for safety
+    process.exit();
+}
 
-    // After all work is done, manually trigger garbage collection.
-    if (global.gc) {
-        global.gc();
-        logger.debug({ url }, 'Garbage collection triggered in worker.');
-    }
+// 1. Listen for tasks from the main thread (the pool)
+parentPort.on('message', async (task) => {
+    // Ensure we have a valid task object with a URL
+    if (task && task.url) {
+        logger.debug({ url: task.url }, `Worker received task.`);
+        
+        // 2. Do the work
+        await processThread(task.url);
 
-    // Post a simple message back to indicate the task is complete.
-    if (parentPort) {
+        // 3. Trigger garbage collection after processing
+        if (global.gc) {
+            global.gc();
+        }
+
+        // 4. Signal that this worker has completed its task and is ready for more.
         parentPort.postMessage('done');
     }
-})();
+});
+
+// 5. Signal that the worker has initialized and is ready for its *first* task.
+parentPort.postMessage('ready');
