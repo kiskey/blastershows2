@@ -3,6 +3,7 @@
 const redis = require('./redis');
 const logger = require('../utils/logger');
 const { getTrackers } = require('../utils/trackers');
+const config = require('../utils/config'); 
 
 async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
     const showKey = `show:${movieKey}`;
@@ -24,14 +25,12 @@ async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
 async function addStream(movieKey, streamInfo) {
     const { infoHash, name, resolution, languages, size, episodes, season: parsedSeason } = streamInfo;
 
-    // A stream is valid if it has a season OR at least one episode.
-    // This correctly handles "Season Packs" that have no episode numbers.
     if (!parsedSeason && episodes.length === 0) {
         logger.warn({ movieKey, name }, "Could not add stream: No season or episode info could be parsed.");
         return;
     }
 
-    const season = parsedSeason || 1; // Default to season 1 if only episodes are found
+    const season = parsedSeason || 1;
     const isEpisodePack = episodes.length > 1;
     const isSeasonPack = episodes.length === 0;
 
@@ -202,6 +201,7 @@ async function getThreadsToRevisit() {
     const results = await pipeline.exec();
 
     const revisitThreshold = new Date();
+    // This line requires the 'config' object
     revisitThreshold.setHours(revisitThreshold.getHours() - config.THREAD_REVISIT_HOURS);
 
     const threadsToRevisit = [];
