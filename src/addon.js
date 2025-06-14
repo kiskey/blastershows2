@@ -9,7 +9,6 @@ const redis = require('./database/redis');
 
 const app = express();
 app.use(cors());
-// Don't log requests for the root path to keep logs clean
 app.use((req, res, next) => {
     if (req.path !== '/') {
         logger.info({ path: req.path, query: req.query }, 'Request received');
@@ -19,30 +18,18 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
     id: 'tamilblasters.series.hybrid',
-    version: '3.3.0', // Version bump for UI enhancement
+    version: '3.3.0',
     name: 'TamilBlasters Hybrid',
     description: 'Provides a custom catalog and intelligently filtered P2P streams for TV Series from the 1TamilBlasters forum.',
     types: ['series'],
     resources: ['catalog', 'stream'],
-    catalogs: [
-        {
-            type: 'series',
-            id: 'tamilblasters-custom',
-            name: 'TamilBlasters Catalog'
-        }
-    ],
+    catalogs: [{ type: 'series', id: 'tamilblasters-custom', name: 'TamilBlasters Catalog' }],
     idPrefixes: ['tt', 'tmdb'],
-    behaviorHints: {
-        configurable: false,
-        configurationRequired: false
-    }
+    behaviorHints: { configurable: false, configurationRequired: false }
 };
 
-// --- START OF NEW INDEX PAGE ROUTE ---
 app.get('/', (req, res) => {
     const manifestUrl = `${req.protocol}://${req.get('host')}/manifest.json`;
-
-    // A simple HTML template with embedded CSS for a clean look
     const html = `
     <!DOCTYPE html>
     <html lang="en">
@@ -75,45 +62,18 @@ app.get('/', (req, res) => {
             <div style="text-align:center;">
                 <a href="stremio://install-addon/${encodeURIComponent(manifestUrl)}" class="install-button">Install Addon</a>
             </div>
-
             <div class="section">
                 <h2>Endpoints & Usage</h2>
                 <table>
                     <tr><th>Endpoint</th><th>Description & Example</th></tr>
-                    <tr>
-                        <td><code>/manifest.json</code></td>
-                        <td>The addon's manifest file required by Stremio.</td>
-                    </tr>
-                    <tr>
-                        <td><code>/catalog/series/tamilblasters-custom.json</code></td>
-                        <td>Serves the custom, browseable catalog of all parsed shows.</td>
-                    </tr>
-                    <tr>
-                        <td><code>/stream/series/{id}.json</code></td>
-                        <td>Provides streams. Stremio calls this automatically. <br>Example ID: <code>tt1234567:1:1</code></td>
-                    </tr>
-                    <tr>
-                        <td><code>/debug/redis/{key}</code></td>
-                        <td>
-                            Inspect a Redis key. Key must be URL encoded.
-                            <br><b>Example (IMDb Map):</b> <code>/debug/redis/imdb_map%3Att10919420</code>
-                            <br><b>Example (Streams):</b> <code>/debug/redis/stream%3Atmdb%3A122294</code>
-                            <br><b>Example (Orphans):</b> <code>/debug/redis/unmatched_magnets</code>
-                        </td>
-                    </tr>
+                    <tr><td><code>/manifest.json</code></td><td>The addon's manifest file.</td></tr>
+                    <tr><td><code>/catalog/series/tamilblasters-custom.json</code></td><td>Serves the custom, browseable catalog.</td></tr>
+                    <tr><td><code>/stream/series/{id}.json</code></td><td>Provides streams. Example ID: <code>tt1234567:1:1</code></td></tr>
+                    <tr><td><code>/debug/redis/{key}</code></td><td>Inspect a Redis key. <br><b>Example (IMDb Map):</b> <code>/debug/redis/imdb_map%3Att10919420</code><br><b>Example (Orphans):</b> <code>/debug/redis/unmatched_magnets?page=1</code></td></tr>
                 </table>
             </div>
-
-            <div class="section">
-                <h2>Configuration</h2>
-                <p>These are the current settings loaded from environment variables.</p>
-                <pre><code>${JSON.stringify(config, null, 2)}</code></pre>
-            </div>
-
-            <div class="section">
-                <h2>Manifest Details</h2>
-                <pre><code>${JSON.stringify(MANIFEST, null, 2)}</code></pre>
-            </div>
+            <div class="section"><h2>Configuration</h2><pre><code>${JSON.stringify(config, null, 2)}</code></pre></div>
+            <div class="section"><h2>Manifest Details</h2><pre><code>${JSON.stringify(MANIFEST, null, 2)}</code></pre></div>
         </div>
     </body>
     </html>
@@ -121,18 +81,80 @@ app.get('/', (req, res) => {
     res.setHeader('Content-Type', 'text/html');
     res.send(html);
 });
-// --- END OF NEW INDEX PAGE ROUTE ---
 
-app.get('/manifest.json', (req, res) => {
-    res.json(MANIFEST);
+app.get('/manifest.json', (req, res) => { res.json(MANIFEST); });
+app.get('/catalog/series/tamilblasters-custom.json', async (req, res) => {
+    logger.info('Request for custom catalog received.');
+    const metas = await dataManager.getCustomCatalog();
+    res.json({ metas });
 });
+app.get('/stream/series/:id.json', async (req, res) => {
+    const { id } = req.params;
+    const idParts = id.split(':');
+    const sourceId = idParts[0];
+    const requestedSeason = idParts[1] ? parseInt(idParts[1], 10) : null;
+    const requestedEpisode = idParts[2] ? parseInt(idParts[2], 10) : null;
+    let tmdbId = null;
+    if (sourceId.startsWith('tt')) {
+        tmdbId = await dataManager.getTmdbIdByImdbId(sourceId);
+    } else if (sourceId === 'tmdb') {
+        tmdbId = idParts[1];
+    }
+    if (!tmdbId) return res.json({ streams: [] });
+    const streams = await dataManager.getStreamsByTmdbId(tmdbId, requestedSeason, requestedEpisode);
+    if (!streams || streams.length === 0) return res.json({ streams: [] });
+    res.json({ streams });
+});
+app.get('/health', (req, res) => { res.status(200).send('OK'); });
 
-// ... all other endpoints (/catalog, /stream, /health, /debug) are unchanged ...
-app.get('/catalog/series/tamilblasters-custom.json', async (req, res) => { /* ... */ });
-app.get('/stream/series/:id.json', async (req, res) => { /* ... */ });
-app.get('/health', (req, res) => { /* ... */ });
-app.get('/debug/redis/:key', async (req, res) => { /* ... */ });
+// --- DEBUG ENDPOINT WITH PAGINATION ---
+app.get('/debug/redis/:key', async (req, res) => {
+    if (config.NODE_ENV !== 'development') {
+        return res.status(403).send('Forbidden in production environment');
+    }
+    const { key } = req.params;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = 100;
+    const start = (page - 1) * limit;
+    const end = start + limit - 1;
 
+    logger.info({ key, page }, 'Redis debug request');
+    
+    try {
+        const type = await redis.type(key);
+        let data, totalItems = 0;
+
+        switch (type) {
+            case 'hash': data = await redis.hgetall(key); break;
+            case 'string': data = await redis.get(key); break;
+            case 'zset': data = await redis.zrevrange(key, 0, -1, 'WITHSCORES'); break;
+            case 'list':
+                 totalItems = await redis.llen(key);
+                 data = await redis.lrange(key, start, end);
+                 break;
+            case 'none': return res.status(404).json({ error: 'Key not found' });
+            default: return res.status(400).json({ error: `Unsupported key type: ${type}` });
+        }
+        
+        const parseJson = (item) => { try { return JSON.parse(item); } catch (e) { return item; } };
+        if (type === 'hash') { for (const field in data) data[field] = parseJson(data[field]); }
+        else if (type === 'list' || type === 'zset') { data = data.map(parseJson); }
+        
+        if (type === 'list') {
+            res.json({
+                key, type, pagination: {
+                    currentPage: page, pageSize: limit, totalItems,
+                    totalPages: Math.ceil(totalItems / limit)
+                }, data
+            });
+        } else {
+             res.json({ key, type, data });
+        }
+    } catch (error) {
+        logger.error({ err: error, key }, 'Error during redis debug');
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
 
 function startServer() {
     const port = config.PORT;
