@@ -5,17 +5,10 @@ const logger = require('../utils/logger');
 const { getTrackers } = require('../utils/trackers');
 const config = require('../utils/config');
 
-// NEW SCHEMA:
-// imdb_map:{imdbId} -> tmdbId (e.g., imdb_map:tt10919420 -> 122294)
-// stream:tmdb:{tmdbId} -> HASH of all streams for that show
-
+// ... findOrCreateShow and addStream are unchanged ...
 async function findOrCreateShow(tmdbId, imdbId) {
-    // We store the IMDb ID -> TMDb ID mapping.
-    // This is the only "show" data we need to persist for lookups.
     const mappingKey = `imdb_map:${imdbId}`;
-    
     const existingTmdbId = await redis.get(mappingKey);
-    // Only set if it doesn't exist or if the mapping is somehow incorrect (unlikely)
     if (!existingTmdbId || existingTmdbId !== tmdbId.toString()) {
         await redis.set(mappingKey, tmdbId);
         logger.info({ imdbId, tmdbId }, 'Created/refreshed IMDb to TMDb mapping.');
@@ -24,12 +17,10 @@ async function findOrCreateShow(tmdbId, imdbId) {
 
 async function addStream(tmdbId, streamInfo) {
     const { infoHash, name, resolution, languages, size, episodes, season: parsedSeason } = streamInfo;
-
     if (!parsedSeason && episodes.length === 0) {
         logger.warn({ tmdbId, name }, "Could not add stream: No season or episode info could be parsed.");
         return;
     }
-
     const season = parsedSeason || 1;
     const isEpisodePack = episodes.length > 1;
     const isSeasonPack = episodes.length === 0;
@@ -42,22 +33,29 @@ async function addStream(tmdbId, streamInfo) {
     } else {
         streamIdSuffix = `s${season}e${episodes[0]}`;
     }
-
     const streamId = `${infoHash}:${streamIdSuffix}:${resolution}`;
     const streamKey = `stream:tmdb:${tmdbId}`;
-
     const streamData = JSON.stringify({
         id: streamId, infoHash, season, episodes, isEpisodePack, isSeasonPack,
         title: name, resolution, languages, size
     });
-
     await redis.hset(streamKey, streamId, streamData);
     logger.debug({ tmdbId, streamId }, 'Added/updated stream.');
 }
 
+
+// ... getCatalog and getMeta are removed as they are not used by the addon API ...
+
+
+async function getTmdbIdByImdbId(imdbId) {
+    const mappingKey = `imdb_map:${imdbId}`;
+    const tmdbId = await redis.get(mappingKey);
+    return tmdbId;
+}
+
+// --- getStreamsByTmdbId is the only function with changes ---
 async function getStreamsByTmdbId(tmdbId) {
-    const streamKey = `stream:tmdb:${tmdbId}`;
-    const streamData = await redis.hvals(streamKey);
+    const streamData = await redis.hvals(`stream:tmdb:${tmdbId}`);
     if (!streamData.length) return [];
     
     const bestTrackers = getTrackers();
@@ -67,21 +65,24 @@ async function getStreamsByTmdbId(tmdbId) {
         const langString = parsed.languages.join(' / ');
         const seasonNum = String(parsed.season).padStart(2, '0');
 
-        let streamName, streamDescription;
+        let streamDescription;
+        
+        // --- START OF NEW FORMATTING LOGIC ---
+        // The main name is now clean and simple.
+        const streamName = `[TB+] - ${parsed.resolution}`;
 
+        // The description contains all the detailed information.
         if (parsed.isSeasonPack) {
-            streamName = `[${parsed.resolution}] 🎞️ S${seasonNum} Season Pack`;
-            streamDescription = `📺 Season ${seasonNum}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
+            streamDescription = `📺 Season ${seasonNum} Pack\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         } else if (parsed.isEpisodePack) {
             const startEp = String(parsed.episodes[0]).padStart(2, '0');
             const endEp = String(parsed.episodes[parsed.episodes.length - 1]).padStart(2, '0');
-            streamName = `[${parsed.resolution}] 🎞️ S${seasonNum} E${startEp}-E${endEp}`;
-            streamDescription = `📺 Episodes ${startEp}-${endEp}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
+            streamDescription = `📺 S${seasonNum} E${startEp}-E${endEp}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         } else {
             const episodeNum = String(parsed.episodes[0]).padStart(2, '0');
-            streamName = `[${parsed.resolution}] 🎞️ S${seasonNum}E${episodeNum}`;
             streamDescription = `📺 S${seasonNum}E${episodeNum}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         }
+        // --- END OF NEW FORMATTING LOGIC ---
         
         let videoSizeBytes = 0;
         if (parsed.size) {
@@ -94,7 +95,7 @@ async function getStreamsByTmdbId(tmdbId) {
         }
         
         return {
-            name: `[TB+] ${streamName}`,
+            name: streamName,
             description: streamDescription,
             infoHash: parsed.infoHash,
             sources: bestTrackers,
@@ -105,6 +106,7 @@ async function getStreamsByTmdbId(tmdbId) {
         };
     });
 
+    // Sort by season, then episode, then resolution
     streams.sort((a, b) => {
         const seasonA = parseInt(a.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
         const seasonB = parseInt(b.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
@@ -122,12 +124,7 @@ async function getStreamsByTmdbId(tmdbId) {
     return streams;
 }
 
-async function getTmdbIdByImdbId(imdbId) {
-    const mappingKey = `imdb_map:${imdbId}`;
-    const tmdbId = await redis.get(mappingKey);
-    return tmdbId;
-}
-
+// ... updateThreadTimestamp and getThreadsToRevisit are unchanged ...
 async function updateThreadTimestamp(threadUrl) {
     const threadKey = `thread:${Buffer.from(threadUrl).toString('base64')}`;
     await redis.hset(threadKey, 'lastVisited', new Date().toISOString());
