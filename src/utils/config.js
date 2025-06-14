@@ -13,6 +13,7 @@ const config = {
     MAX_CONCURRENCY: parseInt(process.env.MAX_CONCURRENCY, 10) || 4,
     USER_AGENT: process.env.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
     TMDB_API_KEY: process.env.TMDB_API_KEY || null,
+    OMDB_API_KEY: process.env.OMDB_API_KEY || null,
 };
 
 // Validate URLs
