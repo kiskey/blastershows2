@@ -1,37 +1,42 @@
-// src/index.js (Updated and Simplified)
+// src/index.js
 
 const { runCrawler, scheduleCrawls } = require('./crawler/crawler');
 const { startServer } = require('./addon');
 const config = require('./utils/config');
 const logger = require('./utils/logger');
 const redisClient = require('./database/redis');
-require('./utils/trackers');
-
-// The entire application will run in a single process.
-// The WorkerPool inside crawler.js will handle the actual concurrency using worker_threads.
+require('./utils/trackers'); // Initialize tracker fetching
+require('./utils/apiClient'); // Initialize resilient api client
 
 async function main() {
     logger.info(`Main process ${process.pid} is starting...`);
 
+    // --- START OF CHANGES ---
     if (config.PURGE_ON_START) {
-        logger.warn('PURGE_ON_START is true. Clearing Redis database...');
+        logger.warn('PURGE_ON_START is true. Clearing ENTIRE Redis database...');
         await redisClient.flushdb();
         logger.info('Redis database cleared.');
+    } else if (config.PURGE_ORPHANS_ON_START) {
+        // This is the new, selective purge
+        logger.warn('PURGE_ORPHANS_ON_START is true. Clearing unmatched_magnets list...');
+        await redisClient.del('unmatched_magnets');
+        logger.info('Orphan magnet list cleared.');
     }
+    // --- END OF CHANGES ---
 
-    // Start the Stremio addon server immediately so the app is responsive.
+    // Start the Stremio addon server immediately.
     startServer();
 
     // Run the initial crawl in the background.
-    // We don't use 'await' here so the server starts without waiting for the crawl to finish.
     logger.info(`Starting initial crawl for ${config.INITIAL_PAGES} pages in the background...`);
-    runCrawler(true);
+    runCrawler(true).catch(err => {
+        logger.error({ err }, "Initial crawler run failed.");
+    });
 
-    // Schedule subsequent crawls, which will also run in the background.
+    // Schedule subsequent crawls.
     scheduleCrawls();
 }
 
-// Run the main function and catch any fatal startup errors.
 main().catch(err => {
     logger.error({ err, stack: err.stack }, "A critical error occurred during application startup.");
     process.exit(1);
