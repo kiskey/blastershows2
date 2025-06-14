@@ -5,7 +5,7 @@ const cors = require('cors');
 const dataManager = require('./database/dataManager');
 const config = require('./utils/config');
 const logger = require('./utils/logger');
-const redis = require('./database/redis'); // Import redis client for debug
+const redis = require('./database/redis');
 
 const app = express();
 app.use(cors());
@@ -16,28 +16,32 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
     id: 'tamilblasters.series.provider',
-    version: '2.0.0', // Major version change reflects new architecture
+    version: '2.0.1', // Incremented version for the fix
     name: 'TamilBlasters Provider',
     description: 'Provides P2P streams from the 1TamilBlasters forum for TV Series.',
-    // We only provide streams for the existing 'series' type.
     resources: ['stream'],
     types: ['series'], 
-    // This tells Stremio that we can provide streams for items with these ID prefixes.
-    idPrefixes: ['tmdb:', 'imdb:'],
-    catalogs: [] // We no longer provide our own catalog.
+    idPrefixes: ['tmdb:'], // We can simplify this to just what we handle
+    catalogs: [],
+
+    // --- START OF THE FIX ---
+    // This hints to Stremio that this addon can provide content for items
+    // viewed elsewhere in the app, effectively activating it as a provider.
+    "behaviorHints": {
+        "configurable": true,
+        "configurationRequired": false
+    }
+    // --- END OF THE FIX ---
 };
 
 app.get('/manifest.json', (req, res) => {
     res.json(MANIFEST);
 });
 
-// This is now our one and only primary content endpoint.
 app.get('/stream/series/:id.json', async (req, res) => {
     const { id } = req.params;
     logger.info(`Stream request for id: ${id}`);
     
-    // The ID will be in the format "tmdb:12345" or "imdb:tt12345".
-    // We will primarily handle TMDb IDs.
     const [source, externalId] = id.split(':');
     if (source !== 'tmdb' || !externalId) {
         logger.warn({ id }, 'Request for non-TMDb ID or invalid format, returning no streams.');
@@ -58,7 +62,6 @@ app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
 
-// The debug endpoint remains as it is very useful for checking data.
 app.get('/debug/redis/:key', async (req, res) => {
     if (config.NODE_ENV !== 'development') {
         return res.status(403).send('Forbidden in production environment');
@@ -83,14 +86,11 @@ app.get('/debug/redis/:key', async (req, res) => {
                 return res.status(400).json({ error: `Unsupported key type: ${type}` });
         }
         
-        // If data is a hash with JSON strings, parse them for readability
         if (type === 'hash') {
             for (const field in data) {
                 try {
                     data[field] = JSON.parse(data[field]);
-                } catch (e) {
-                    // Not a JSON string, leave as is
-                }
+                } catch (e) { /* Not JSON, leave as is */ }
             }
         }
         
