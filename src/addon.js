@@ -16,7 +16,7 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
     id: 'tamilblasters.series.hybrid',
-    version: '3.1.0', // Final feature enhancement
+    version: '3.2.0', // Version bump for orphan logging feature
     name: 'TamilBlasters Hybrid',
     description: 'Provides a custom catalog and intelligently filtered P2P streams for TV Series from the 1TamilBlasters forum.',
     types: ['series'],
@@ -51,19 +51,13 @@ app.get('/stream/series/:id.json', async (req, res) => {
     
     const idParts = id.split(':');
     const sourceId = idParts[0];
-
-    // Extract season and episode numbers from the request ID (e.g., tt12345:1:6)
     const requestedSeason = idParts[1] ? parseInt(idParts[1], 10) : null;
     const requestedEpisode = idParts[2] ? parseInt(idParts[2], 10) : null;
-    logger.info({ sourceId, requestedSeason, requestedEpisode }, 'Parsed request ID');
-
+    
     let tmdbId = null;
     if (sourceId.startsWith('tt')) {
         tmdbId = await dataManager.getTmdbIdByImdbId(sourceId);
     } else if (sourceId === 'tmdb') {
-        // When the ID is tmdb:*, the season/episode info isn't included in the ID itself.
-        // The request for a specific episode comes from a meta object that has that info.
-        // For now, our logic primarily relies on the tt*:S:E format for episode filtering.
         tmdbId = idParts[1];
     }
 
@@ -72,7 +66,6 @@ app.get('/stream/series/:id.json', async (req, res) => {
         return res.json({ streams: [] });
     }
 
-    // Pass the requested season/episode to the dataManager for intelligent filtering.
     const streams = await dataManager.getStreamsByTmdbId(tmdbId, requestedSeason, requestedEpisode);
     
     if (!streams || streams.length === 0) {
@@ -80,7 +73,6 @@ app.get('/stream/series/:id.json', async (req, res) => {
         return res.json({ streams: [] });
     }
 
-    logger.info({ tmdbId, count: streams.length }, 'Returning filtered streams.');
     res.json({ streams });
 });
 
@@ -109,16 +101,24 @@ app.get('/debug/redis/:key', async (req, res) => {
             case 'zset':
                  data = await redis.zrevrange(key, 0, -1, 'WITHSCORES');
                  break;
+            case 'list': // Support for the new orphan list
+                 data = await redis.lrange(key, 0, -1);
+                 break;
             case 'none':
                 return res.status(404).json({ error: 'Key not found' });
             default:
                 return res.status(400).json({ error: `Unsupported key type: ${type}` });
         }
         
+        // Universal JSON parsing for list or hash values
+        const parseJson = (item) => {
+            try { return JSON.parse(item); } catch (e) { return item; }
+        };
+
         if (type === 'hash') {
-            for (const field in data) {
-                try { data[field] = JSON.parse(data[field]); } catch (e) {}
-            }
+            for (const field in data) { data[field] = parseJson(data[field]); }
+        } else if (type === 'list' || type === 'zset') {
+            data = data.map(parseJson);
         }
         
         res.json({ key, type, data });
