@@ -6,6 +6,7 @@ const dataManager = require('./database/dataManager');
 const config = require('./utils/config');
 const logger = require('./utils/logger');
 const redis = require('./database/redis');
+const { findByImdbId } = require('./utils/tmdb');
 
 const app = express();
 app.use(cors());
@@ -15,20 +16,25 @@ app.use((req, res, next) => {
 });
 
 const MANIFEST = {
-    id: 'tamilblasters.series.provider.final',
-    version: '2.4.0', // Final version for this robust architecture
-    name: 'TamilBlasters Provider',
-    description: 'Provides P2P streams from the 1TamilBlasters forum for TV Series.',
+    id: 'tamilblasters.series.hybrid',
+    version: '3.0.0', // Major version for new architecture
+    name: 'TamilBlasters Hybrid',
+    description: 'Provides a custom catalog and P2P streams for TV Series from the 1TamilBlasters forum.',
     types: ['series'],
-    resources: ['stream'],
+    // We now provide our own catalog AND act as a stream provider for others.
+    resources: ['catalog', 'stream'],
+    
     catalogs: [
         {
             type: 'series',
-            id: 'tamilblasters-series-search',
-            name: 'TamilBlasters Search',
-            extra: [{ name: 'search', isRequired: true }]
+            id: 'tamilblasters-custom',
+            name: 'TamilBlasters Catalog'
         }
     ],
+    
+    // We explicitly state we can handle both ID prefixes.
+    idPrefixes: ['tt', 'tmdb'],
+    
     behaviorHints: {
         configurable: false,
         configurationRequired: false
@@ -39,6 +45,14 @@ app.get('/manifest.json', (req, res) => {
     res.json(MANIFEST);
 });
 
+// The new custom catalog endpoint
+app.get('/catalog/series/tamilblasters-custom.json', async (req, res) => {
+    logger.info('Request for custom catalog received.');
+    const metas = await dataManager.getCustomCatalog();
+    res.json({ metas });
+});
+
+// The universal stream handler remains the same
 app.get('/stream/series/:id.json', async (req, res) => {
     const { id } = req.params;
     logger.info(`Stream request for id: ${id}`);
@@ -49,11 +63,9 @@ app.get('/stream/series/:id.json', async (req, res) => {
     let tmdbId = null;
 
     if (sourceId.startsWith('tt')) {
-        // It's an IMDb ID. Look it up in OUR Redis database for speed and accuracy.
         logger.info({ imdbId: sourceId }, 'IMDb ID detected, looking up in local Redis map...');
         tmdbId = await dataManager.getTmdbIdByImdbId(sourceId);
     } else if (sourceId === 'tmdb') {
-        // It's already a TMDb ID.
         tmdbId = idParts[1];
     }
 
@@ -72,10 +84,6 @@ app.get('/stream/series/:id.json', async (req, res) => {
     res.json({ streams });
 });
 
-app.get('/catalog/series/tamilblasters-series-search.json', (req, res) => {
-    logger.info('Responding to dummy search catalog request.');
-    res.json({ metas: [] });
-});
 
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
@@ -99,6 +107,9 @@ app.get('/debug/redis/:key', async (req, res) => {
             case 'string':
                 data = await redis.get(key);
                 break;
+            case 'zset': // Added support for sorted sets
+                 data = await redis.zrevrange(key, 0, -1, 'WITHSCORES');
+                 break;
             case 'none':
                 return res.status(404).json({ error: 'Key not found' });
             default:
@@ -107,9 +118,7 @@ app.get('/debug/redis/:key', async (req, res) => {
         
         if (type === 'hash') {
             for (const field in data) {
-                try {
-                    data[field] = JSON.parse(data[field]);
-                } catch (e) { /* Not JSON, leave as is */ }
+                try { data[field] = JSON.parse(data[field]); } catch (e) {}
             }
         }
         
