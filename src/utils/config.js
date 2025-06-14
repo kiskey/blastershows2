@@ -7,6 +7,7 @@ const config = {
     FORUM_URL: process.env.FORUM_URL || 'https://www.1tamilblasters.fi/index.php?/forums/forum/63-tamil-new-web-series-tv-shows/',
     DOMAIN_MONITOR: process.env.DOMAIN_MONITOR || 'http://1tamilblasters.net',
     PURGE_ON_START: process.env.PURGE_ON_START === 'true',
+    PURGE_ORPHANS_ON_START: process.env.PURGE_ORPHANS_ON_START === 'true',
     INITIAL_PAGES: parseInt(process.env.INITIAL_PAGES, 10) || 2,
     CRAWL_INTERVAL: parseInt(process.env.CRAWL_INTERVAL, 10) || 1800,
     THREAD_REVISIT_HOURS: parseInt(process.env.THREAD_REVISIT_HOURS, 10) || 24,
