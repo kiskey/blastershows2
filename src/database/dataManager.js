@@ -3,30 +3,32 @@
 const redis = require('./redis');
 const logger = require('../utils/logger');
 const { getTrackers } = require('../utils/trackers');
-const config = require('../utils/config'); 
+const config = require('../utils/config');
 
-async function findOrCreateShow(movieKey, originalTitle, posterUrl, year) {
-    const showKey = `show:${movieKey}`;
-    const exists = await redis.exists(showKey);
+// NEW SCHEMA:
+// show_map:{baseTitle}:{year} -> tmdbId (e.g., show_map:la-brea:2022 -> 126154)
+// show_map:{baseTitle} -> tmdbId (e.g., show_map:and-just-like-that -> 117621)
+// stream:tmdb:{tmdbId} -> HASH of all streams for that show
+
+async function findOrCreateShow(baseTitle, year, tmdbId) {
+    // We create mappings from our title/year to the official TMDb ID.
+    // This allows us to find the TMDb ID again in the future if we only have the title.
+    const mappingKeyWithYear = `show_map:${baseTitle}:${year}`;
+    const mappingKeyWithoutYear = `show_map:${baseTitle}`;
     
-    if (!exists) {
-        await redis.hset(showKey, {
-            originalTitle,
-            posterUrl,
-            year: year || '', 
-            createdAt: new Date().toISOString()
-        });
-        logger.info({ movieKey, title: originalTitle }, 'Created new show entry in Redis.');
-    } else {
-         await redis.hset(showKey, 'posterUrl', posterUrl);
-    }
+    const pipeline = redis.pipeline();
+    pipeline.set(mappingKeyWithYear, tmdbId, 'EX', 60 * 60 * 24 * 30); // Expire in 30 days
+    pipeline.set(mappingKeyWithoutYear, tmdbId, 'EX', 60 * 60 * 24 * 30);
+    await pipeline.exec();
+    
+    logger.info({ title: baseTitle, year, tmdbId }, 'Created/refreshed mapping to TMDb ID.');
 }
 
-async function addStream(movieKey, streamInfo) {
+async function addStream(tmdbId, streamInfo) {
     const { infoHash, name, resolution, languages, size, episodes, season: parsedSeason } = streamInfo;
 
     if (!parsedSeason && episodes.length === 0) {
-        logger.warn({ movieKey, name }, "Could not add stream: No season or episode info could be parsed.");
+        logger.warn({ tmdbId, name }, "Could not add stream: No season or episode info could be parsed.");
         return;
     }
 
@@ -44,85 +46,21 @@ async function addStream(movieKey, streamInfo) {
     }
 
     const streamId = `${infoHash}:${streamIdSuffix}:${resolution}`;
-    const streamKey = `stream:${movieKey}`;
+    // The stream key is now based on the TMDb ID
+    const streamKey = `stream:tmdb:${tmdbId}`;
 
     const streamData = JSON.stringify({
-        id: streamId,
-        infoHash, season, episodes, isEpisodePack, isSeasonPack,
+        id: streamId, infoHash, season, episodes, isEpisodePack, isSeasonPack,
         title: name, resolution, languages, size
     });
 
     await redis.hset(streamKey, streamId, streamData);
-    logger.debug({ movieKey, streamId }, 'Added/updated stream.');
+    logger.debug({ tmdbId, streamId }, 'Added/updated stream.');
 }
 
-async function getCatalog() {
-    const keys = await redis.keys('show:*');
-    if (!keys.length) return [];
-
-    const pipeline = redis.pipeline();
-    keys.forEach(key => pipeline.hgetall(key));
-    const results = await pipeline.exec();
-
-    let metas = results.map(([, data], index) => {
-        if (!data || !data.originalTitle) return null;
-        
-        const pttTitleMatch = data.originalTitle.match(/^([^[(]+)/);
-        const cleanName = pttTitleMatch ? pttTitleMatch[1].trim() : data.originalTitle;
-        const nameWithYear = data.year ? `${cleanName} (${data.year})` : cleanName;
-
-        return {
-            id: keys[index].substring(5),
-            type: 'movie',
-            name: nameWithYear,
-            poster: data.posterUrl,
-            year: data.year ? parseInt(data.year, 10) : null 
-        };
-    }).filter(Boolean);
-
-    metas.sort((a, b) => {
-        const yearA = a.year;
-        const yearB = b.year;
-        const nameA = a.name.toLowerCase();
-        const nameB = b.name.toLowerCase();
-
-        if (yearA && !yearB) return 1;
-        if (!yearA && yearB) return -1;
-        if (!yearA && !yearB) {
-            if (nameA < nameB) return -1;
-            if (nameA > nameB) return 1;
-            return 0;
-        }
-        if (yearA !== yearB) return yearB - yearA;
-        if (nameA < nameB) return -1;
-        if (nameA > nameB) return 1;
-        return 0;
-    });
-
-    return metas;
-}
-
-async function getMeta(movieKey) {
-    const showData = await redis.hgetall(`show:${movieKey}`);
-    if (!showData.originalTitle) return null;
-
-    const pttTitleMatch = showData.originalTitle.match(/^([^[(]+)/);
-    const cleanName = pttTitleMatch ? pttTitleMatch[1].trim() : showData.originalTitle;
-    const description = showData.year ? `Title: ${cleanName}\nYear: ${showData.year}` : `Title: ${cleanName}`;
-    const nameWithYear = showData.year ? `${cleanName} (${showData.year})` : cleanName;
-
-    return {
-        id: movieKey,
-        type: 'movie',
-        name: nameWithYear,
-        poster: showData.posterUrl,
-        description,
-        background: showData.posterUrl
-    };
-}
-
-async function getStreams(movieKey) {
-    const streamData = await redis.hvals(`stream:${movieKey}`);
+async function getStreamsByTmdbId(tmdbId) {
+    const streamKey = `stream:tmdb:${tmdbId}`;
+    const streamData = await redis.hvals(streamKey);
     if (!streamData.length) return [];
     
     const bestTrackers = getTrackers();
@@ -135,16 +73,16 @@ async function getStreams(movieKey) {
         let streamName, streamDescription;
 
         if (parsed.isSeasonPack) {
-            streamName = `[${parsed.resolution}] S${seasonNum} Season Pack`;
+            streamName = `[${parsed.resolution}] 🎞️ S${seasonNum} Season Pack`;
             streamDescription = `📺 Season ${seasonNum}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         } else if (parsed.isEpisodePack) {
             const startEp = String(parsed.episodes[0]).padStart(2, '0');
             const endEp = String(parsed.episodes[parsed.episodes.length - 1]).padStart(2, '0');
-            streamName = `[${parsed.resolution}] S${seasonNum} E${startEp}-E${endEp} Pack`;
+            streamName = `[${parsed.resolution}] 🎞️ S${seasonNum} E${startEp}-E${endEp}`;
             streamDescription = `📺 Episodes ${startEp}-${endEp}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         } else {
             const episodeNum = String(parsed.episodes[0]).padStart(2, '0');
-            streamName = `[${parsed.resolution}] S${seasonNum}E${episodeNum}`;
+            streamName = `[${parsed.resolution}] 🎞️ S${seasonNum}E${episodeNum}`;
             streamDescription = `📺 S${seasonNum}E${episodeNum}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         }
         
@@ -159,29 +97,30 @@ async function getStreams(movieKey) {
         }
         
         return {
-            name: streamName,
+            name: `[TB+] ${streamName}`,
             description: streamDescription,
             infoHash: parsed.infoHash,
             sources: bestTrackers,
             behaviorHints: {
                 bingeGroup: `tamilblasters-${parsed.resolution}`,
-                videoSize: videoSizeBytes > 0 ? videoSizeBytes : undefined, 
+                videoSize: videoSizeBytes > 0 ? videoSizeBytes : undefined,
             }
         };
     });
 
+    // Sort by season, then episode, then resolution
     streams.sort((a, b) => {
-        const resA = parseInt(a.name.match(/\d{3,4}/)?.[0] || 0);
-        const resB = parseInt(b.name.match(/\d{3,4}/)?.[0] || 0);
-        if (resB !== resA) return resB - resA;
-
         const seasonA = parseInt(a.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
         const seasonB = parseInt(b.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
         if (seasonA !== seasonB) return seasonA - seasonB;
         
         const episodeA = parseInt(a.description.match(/E(\d+)/)?.[1] || 0);
         const episodeB = parseInt(b.description.match(/E(\d+)/)?.[1] || 0);
-        return episodeA - episodeB;
+        if (episodeA !== episodeB) return episodeA - episodeB;
+
+        const resA = parseInt(a.name.match(/\d{3,4}/)?.[0] || 0);
+        const resB = parseInt(b.name.match(/\d{3,4}/)?.[0] || 0);
+        return resB - resA;
     });
 
     return streams;
@@ -201,7 +140,6 @@ async function getThreadsToRevisit() {
     const results = await pipeline.exec();
 
     const revisitThreshold = new Date();
-    // This line requires the 'config' object
     revisitThreshold.setHours(revisitThreshold.getHours() - config.THREAD_REVISIT_HOURS);
 
     const threadsToRevisit = [];
@@ -218,9 +156,7 @@ async function getThreadsToRevisit() {
 module.exports = {
     findOrCreateShow,
     addStream,
-    getCatalog,
-    getMeta,
-    getStreams,
+    getStreamsByTmdbId,
     updateThreadTimestamp,
     getThreadsToRevisit
 };
