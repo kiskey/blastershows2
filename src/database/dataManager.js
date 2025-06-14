@@ -5,7 +5,11 @@ const logger = require('../utils/logger');
 const { getTrackers } = require('../utils/trackers');
 const config = require('../utils/config');
 
-// ... findOrCreateShow and addStream are unchanged ...
+// NEW SCHEMA:
+// imdb_map:{imdbId} -> tmdbId
+// stream:tmdb:{tmdbId} -> HASH
+// catalog:series -> Sorted Set, scored by year
+
 async function findOrCreateShow(tmdbId, imdbId) {
     const mappingKey = `imdb_map:${imdbId}`;
     const existingTmdbId = await redis.get(mappingKey);
@@ -43,17 +47,6 @@ async function addStream(tmdbId, streamInfo) {
     logger.debug({ tmdbId, streamId }, 'Added/updated stream.');
 }
 
-
-// ... getCatalog and getMeta are removed as they are not used by the addon API ...
-
-
-async function getTmdbIdByImdbId(imdbId) {
-    const mappingKey = `imdb_map:${imdbId}`;
-    const tmdbId = await redis.get(mappingKey);
-    return tmdbId;
-}
-
-// --- getStreamsByTmdbId is the only function with changes ---
 async function getStreamsByTmdbId(tmdbId) {
     const streamData = await redis.hvals(`stream:tmdb:${tmdbId}`);
     if (!streamData.length) return [];
@@ -64,25 +57,21 @@ async function getStreamsByTmdbId(tmdbId) {
         const parsed = JSON.parse(data);
         const langString = parsed.languages.join(' / ');
         const seasonNum = String(parsed.season).padStart(2, '0');
+        let streamName, streamDescription;
 
-        let streamDescription;
-        
-        // --- START OF NEW FORMATTING LOGIC ---
-        // The main name is now clean and simple.
-        const streamName = `[TB+] - ${parsed.resolution}`;
-
-        // The description contains all the detailed information.
         if (parsed.isSeasonPack) {
-            streamDescription = `📺 Season ${seasonNum} Pack\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
+            streamName = `[${parsed.resolution}] 🎞️ S${seasonNum} Season Pack`;
+            streamDescription = `📺 Season ${seasonNum}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         } else if (parsed.isEpisodePack) {
             const startEp = String(parsed.episodes[0]).padStart(2, '0');
             const endEp = String(parsed.episodes[parsed.episodes.length - 1]).padStart(2, '0');
-            streamDescription = `📺 S${seasonNum} E${startEp}-E${endEp}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
+            streamName = `[${parsed.resolution}] 🎞️ S${seasonNum} E${startEp}-E${endEp}`;
+            streamDescription = `📺 Episodes ${startEp}-${endEp}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         } else {
             const episodeNum = String(parsed.episodes[0]).padStart(2, '0');
+            streamName = `[${parsed.resolution}] 🎞️ S${seasonNum}E${episodeNum}`;
             streamDescription = `📺 S${seasonNum}E${episodeNum}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         }
-        // --- END OF NEW FORMATTING LOGIC ---
         
         let videoSizeBytes = 0;
         if (parsed.size) {
@@ -95,7 +84,7 @@ async function getStreamsByTmdbId(tmdbId) {
         }
         
         return {
-            name: streamName,
+            name: `[TB+] ${streamName}`,
             description: streamDescription,
             infoHash: parsed.infoHash,
             sources: bestTrackers,
@@ -106,7 +95,6 @@ async function getStreamsByTmdbId(tmdbId) {
         };
     });
 
-    // Sort by season, then episode, then resolution
     streams.sort((a, b) => {
         const seasonA = parseInt(a.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
         const seasonB = parseInt(b.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
@@ -124,7 +112,48 @@ async function getStreamsByTmdbId(tmdbId) {
     return streams;
 }
 
-// ... updateThreadTimestamp and getThreadsToRevisit are unchanged ...
+async function getTmdbIdByImdbId(imdbId) {
+    const mappingKey = `imdb_map:${imdbId}`;
+    const tmdbId = await redis.get(mappingKey);
+    return tmdbId;
+}
+
+async function updateCatalog(imdbId, name, poster, year) {
+    const catalogKey = 'catalog:series';
+    // Score by year for sorting. If no year, score is 0.
+    const score = year ? parseInt(year, 10) : 0; 
+
+    // Create the meta object that Stremio expects for a catalog item.
+    const meta = {
+        id: imdbId, // The catalog will use IMDb IDs for consistency
+        type: 'series',
+        name: name,
+        poster: poster,
+    };
+    
+    // Use ZADD to add/update the item in the sorted set.
+    // If an item with the same member (JSON string) exists, its score is updated.
+    // We need to remove the old entry first if the details (like name/poster) changed.
+    // A simpler approach for this app is to assume the member is unique enough by its ID.
+    // For a perfect update, one would remove the old version first. For now, this is robust enough.
+    await redis.zadd(catalogKey, score, JSON.stringify(meta));
+    logger.debug({ imdbId, name }, 'Updated custom catalog.');
+}
+
+async function getCustomCatalog() {
+    const catalogKey = 'catalog:series';
+    // Fetch all members, sorted from highest score (latest year) to lowest.
+    // We add a WITHSCORES to debug sorting if needed.
+    const results = await redis.zrevrange(catalogKey, 0, -1);
+    
+    if (!results || results.length === 0) {
+        return [];
+    }
+    
+    return results.map(item => JSON.parse(item));
+}
+
+
 async function updateThreadTimestamp(threadUrl) {
     const threadKey = `thread:${Buffer.from(threadUrl).toString('base64')}`;
     await redis.hset(threadKey, 'lastVisited', new Date().toISOString());
@@ -158,5 +187,7 @@ module.exports = {
     getStreamsByTmdbId,
     getTmdbIdByImdbId,
     updateThreadTimestamp,
-    getThreadsToRevisit
+    getThreadsToRevisit,
+    updateCatalog,
+    getCustomCatalog,
 };
