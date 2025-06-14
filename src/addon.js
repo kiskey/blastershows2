@@ -14,25 +14,36 @@ app.use((req, res, next) => {
     next();
 });
 
+// --- START OF THE DEFINITIVE FIX ---
 const MANIFEST = {
     id: 'tamilblasters.series.provider',
-    version: '2.0.1', // Incremented version for the fix
+    version: '2.1.0', // New version for the manifest fix
     name: 'TamilBlasters Provider',
     description: 'Provides P2P streams from the 1TamilBlasters forum for TV Series.',
-    resources: ['stream'],
-    types: ['series'], 
-    idPrefixes: ['tmdb:'], // We can simplify this to just what we handle
+    
+    // We only support the 'series' type.
+    types: ['series'],
+    
+    // We no longer provide a catalog.
     catalogs: [],
 
-    // --- START OF THE FIX ---
-    // This hints to Stremio that this addon can provide content for items
-    // viewed elsewhere in the app, effectively activating it as a provider.
-    "behaviorHints": {
-        "configurable": true,
-        "configurationRequired": false
+    // This is the crucial change. We define "stream" as an object.
+    resources: [
+        {
+            name: "stream",
+            types: ["series"],
+            idPrefixes: ["tmdb"] // We can provide streams for items with a "tmdb" prefix.
+        }
+    ],
+    
+    // behaviorHints can be simplified. The presence of infoHash already implies P2P.
+    // The most important thing was the structured 'resources' array.
+    behaviorHints: {
+        configurable: false, // We can set this to false as there's no configuration page.
+        configurationRequired: false
     }
-    // --- END OF THE FIX ---
 };
+// --- END OF THE DEFINITIVE FIX ---
 
 app.get('/manifest.json', (req, res) => {
     res.json(MANIFEST);
@@ -42,19 +53,20 @@ app.get('/stream/series/:id.json', async (req, res) => {
     const { id } = req.params;
     logger.info(`Stream request for id: ${id}`);
     
-    const [source, externalId] = id.split(':');
-    if (source !== 'tmdb' || !externalId) {
-        logger.warn({ id }, 'Request for non-TMDb ID or invalid format, returning no streams.');
+    // The ID will be in the format "tmdb:12345". We need to remove the prefix for our lookup.
+    const tmdbId = id.replace('tmdb:', '');
+    if (!tmdbId) {
+        logger.warn({ id }, 'Request with invalid ID format, returning no streams.');
         return res.json({ streams: [] });
     }
 
-    const streams = await dataManager.getStreamsByTmdbId(externalId);
+    const streams = await dataManager.getStreamsByTmdbId(tmdbId);
     if (!streams || streams.length === 0) {
-        logger.warn({ tmdbId: externalId }, 'No streams found for this TMDb ID.');
+        logger.warn({ tmdbId }, 'No streams found for this TMDb ID.');
         return res.json({ streams: [] });
     }
 
-    logger.info({ tmdbId: externalId, count: streams.length }, 'Returning streams.');
+    logger.info({ tmdbId, count: streams.length }, 'Returning streams.');
     res.json({ streams });
 });
 
