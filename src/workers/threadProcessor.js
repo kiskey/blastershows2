@@ -49,7 +49,6 @@ async function processThread(threadUrl) {
         let metaResult = { tmdbId: null, imdbId: null, poster: null, name: baseTitle, year: year };
 
         // --- METADATA WATERFALL ---
-        // 1. Try TMDb first
         const tmdbSearch = await searchTv(baseTitle, year);
         if (tmdbSearch && tmdbSearch.id) {
             const details = await getTvDetails(tmdbSearch.id);
@@ -58,44 +57,38 @@ async function processThread(threadUrl) {
                 metaResult.imdbId = details.imdbId;
                 metaResult.poster = tmdbSearch.poster_path ? `https://image.tmdb.org/t/p/w500${tmdbSearch.poster_path}` : null;
                 metaResult.name = tmdbSearch.name;
-                // Use the year from TMDb if available as it's more accurate
                 metaResult.year = tmdbSearch.first_air_date ? tmdbSearch.first_air_date.substring(0, 4) : year;
             }
         }
 
-        // 2. If TMDb failed to produce a full result, fallback to OMDb
         if (!metaResult.imdbId) {
-            logger.info({ title: baseTitle }, 'TMDb lookup incomplete, falling back to OMDb.');
             const omdbSearch = await searchOmdb(baseTitle);
             if (omdbSearch && omdbSearch.imdbId) {
                 metaResult.imdbId = omdbSearch.imdbId;
-                metaResult.poster = metaResult.poster || omdbSearch.poster; // Only use OMDb poster if TMDb didn't provide one
+                metaResult.poster = metaResult.poster || omdbSearch.poster;
                 metaResult.name = omdbSearch.title;
                 metaResult.year = omdbSearch.year;
-                
-                // We have a reliable IMDb ID, but we still prefer a TMDb ID as our primary key.
-                // We attempt to get the TMDb ID from the IMDb ID.
                 const details = await getTvDetails(metaResult.imdbId);
-                if (details && details.tmdbId) {
-                    metaResult.tmdbId = details.tmdbId;
-                }
+                if(details && details.tmdbId) metaResult.tmdbId = details.tmdbId;
             }
         }
 
-        // 3. Final check: We need an IMDb ID to be a provider and a TMDb ID to store streams.
+        // --- NEW ORPHAN LOGGING LOGIC ---
         if (!metaResult.imdbId || !metaResult.tmdbId) {
-            logger.warn({ title: baseTitle }, "Could not resolve show to a valid TMDb/IMDb ID pair after all fallbacks.");
-            return;
-        }
-
-        // 4. We have a valid result. Store everything.
-        await dataManager.findOrCreateShow(metaResult.tmdbId, metaResult.imdbId);
-        await dataManager.updateCatalog(metaResult.imdbId, metaResult.name, metaResult.poster, metaResult.year);
-        
-        for (const magnetUri of threadData.magnets) {
-            const parsedStream = parseTitle(magnetUri);
-            if (parsedStream) {
-                await dataManager.addStream(metaResult.tmdbId, parsedStream);
+            logger.warn({ title: baseTitle }, "Could not resolve show. Logging magnets as orphans.");
+            // Instead of returning, log the magnets to our orphan list.
+            for (const magnetUri of threadData.magnets) {
+                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl);
+            }
+        } else {
+            // We have a valid result. Store everything as before.
+            await dataManager.findOrCreateShow(metaResult.tmdbId, metaResult.imdbId);
+            await dataManager.updateCatalog(metaResult.imdbId, metaResult.name, metaResult.poster, metaResult.year);
+            for (const magnetUri of threadData.magnets) {
+                const parsedStream = parseTitle(magnetUri);
+                if (parsedStream) {
+                    await dataManager.addStream(metaResult.tmdbId, parsedStream);
+                }
             }
         }
         
@@ -105,7 +98,6 @@ async function processThread(threadUrl) {
         logger.error({ err: error.message, url: threadUrl, stack: error.stack }, 'Error processing thread');
     }
 }
-
 
 if (!parentPort) {
     process.exit();
