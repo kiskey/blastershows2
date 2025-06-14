@@ -14,61 +14,77 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- START OF THE DEFINITIVE FIX ---
+// --- START OF THE DEFINITIVE MANIFEST FIX ---
 const MANIFEST = {
-    id: 'tamilblasters.series.provider',
-    version: '2.1.0', // New version for the manifest fix
+    id: 'tamilblasters.series.provider.final',
+    version: '2.2.0', // Final version for this fix
     name: 'TamilBlasters Provider',
     description: 'Provides P2P streams from the 1TamilBlasters forum for TV Series.',
     
-    // We only support the 'series' type.
     types: ['series'],
     
-    // We no longer provide a catalog.
-    catalogs: [],
+    // We declare that we provide the 'stream' resource.
+    resources: ['stream'],
 
-    // This is the crucial change. We define "stream" as an object.
-    resources: [
+    // We no longer use idPrefixes at the top level.
+
+    // This is the crucial part. We define a "dummy" catalog.
+    // We don't intend for users to browse it, but it tells Stremio's system
+    // that this addon supports the 'search' feature, which is how it
+    // gets integrated into the main search and stream discovery.
+    catalogs: [
         {
-            name: "stream",
-            types: ["series"],
-            idPrefixes: ["tmdb"] // We can provide streams for items with a "tmdb" prefix.
+            type: 'series',
+            id: 'tamilblasters-series-search',
+            name: 'TamilBlasters Search',
+            // By declaring 'search' as a supported 'extra', we signal
+            // that this addon can be queried for any item.
+            extra: [{ name: 'search', isRequired: true }]
         }
     ],
     
-    // behaviorHints can be simplified. The presence of infoHash already implies P2P.
-    // The most important thing was the structured 'resources' array.
+    // These hints are still good practice.
     behaviorHints: {
-        configurable: false, // We can set this to false as there's no configuration page.
+        configurable: false,
         configurationRequired: false
     }
 };
-// --- END OF THE DEFINITIVE FIX ---
+// --- END OF THE DEFINITIVE MANIFEST FIX ---
 
 app.get('/manifest.json', (req, res) => {
     res.json(MANIFEST);
 });
 
+// The stream handler logic is now correct.
 app.get('/stream/series/:id.json', async (req, res) => {
     const { id } = req.params;
     logger.info(`Stream request for id: ${id}`);
     
-    // The ID will be in the format "tmdb:12345". We need to remove the prefix for our lookup.
-    const tmdbId = id.replace('tmdb:', '');
-    if (!tmdbId) {
-        logger.warn({ id }, 'Request with invalid ID format, returning no streams.');
+    const [source, externalId] = id.split(':');
+    if (source !== 'tmdb' || !externalId) {
+        logger.warn({ id }, 'Request for non-TMDb ID or invalid format, returning no streams.');
         return res.json({ streams: [] });
     }
 
-    const streams = await dataManager.getStreamsByTmdbId(tmdbId);
+    const streams = await dataManager.getStreamsByTmdbId(externalId);
     if (!streams || streams.length === 0) {
-        logger.warn({ tmdbId }, 'No streams found for this TMDb ID.');
+        logger.warn({ tmdbId: externalId }, 'No streams found for this TMDb ID.');
         return res.json({ streams: [] });
     }
 
-    logger.info({ tmdbId, count: streams.length }, 'Returning streams.');
+    logger.info({ tmdbId: externalId, count: streams.length }, 'Returning streams.');
     res.json({ streams });
 });
+
+// We must also add a handler for the dummy catalog, even if it does nothing.
+// If Stremio ever calls it (e.g., during a search), we must respond.
+app.get('/catalog/series/tamilblasters-series-search.json', (req, res) => {
+    // We don't need to return any results here. The purpose of this catalog
+    // is purely to register the addon as a provider.
+    logger.info('Responding to dummy search catalog request.');
+    res.json({ metas: [] });
+});
+
 
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
