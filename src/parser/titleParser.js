@@ -9,36 +9,31 @@ const LANG_MAP = {
     tamil: 'ta', malayalam: 'ml', telugu: 'te', hindi: 'hi', english: 'en', korean: 'ko', japanese: 'ja', chi: 'zh'
 };
 
-// --- THE FINAL MASTER REGEX LIST ---
+// --- THE ULTIMATE MASTER REGEX LIST ---
 const PARSING_PATTERNS = [
     // Case 1: Packs like S01EP(01-13) or S01 EP (01-15)
     {
-        regex: /S(\d{1,2})\s?EP\s?\((\d{1,2})[-‑](\d{1,2})\)/i,
+        regex: /S(\d{1,2})\s?EP\s?\((\d{1,3})[-‑](\d{1,3})\)/i,
         type: 'EPISODE_PACK'
     },
-    // Case 2: Packs like S02EP01-07
+    // Case 2: Packs like S02EP01-07 or S01E01-E16
     {
-        regex: /S(\d{1,2})EP(\d{1,2})[-‑](\d{1,2})/i,
+        regex: /S(\d{1,2})\s?(?:E|EP)(\d{1,3})[-‑]E?(\d{1,3})/i,
         type: 'EPISODE_PACK'
     },
-    // Case 3: Packs like S01E01-E16
+    // Case 3: Packs like S01 (01-24)
     {
-        regex: /S(\d{1,2})E(\d{1,2})[-‑]E(\d{1,2})/i,
+        regex: /S(\d{1,2})\s?\((\d{1,3})[-‑](\d{1,3})\)/i,
         type: 'EPISODE_PACK'
     },
-    // Case 4: Single Episodes like S01 EP(06)
+    // Case 4: Single Episodes like S01 EP(06) or S01 E(06)
     {
-        regex: /S(\d{1,2})\s?EP\((\d{1,2})\)/i,
+        regex: /S(\d{1,2})\s?(?:E|EP)\(?(?!\d+[-‑])(\d{1,3})\)?/i,
         type: 'SINGLE_EPISODE'
     },
-    // Case 5: Any remaining SXXEXX format
+    // Case 5: Season-only packs (must not be followed by an episode number)
     {
-        regex: /S(\d{1,2})E(\d{1,2})/i,
-        type: 'SINGLE_EPISODE'
-    },
-    // Case 6: Season-only packs like S1 or S02
-    {
-        regex: /(?:S|Season)\s*(\d{1,2})(?!E|\d)/i, // Negative lookahead to ensure it's not followed by 'E' or another digit
+        regex: /(?:S|Season)\s*(\d{1,2})(?!\s?E|\s?\d)/i,
         type: 'SEASON_PACK'
     }
 ];
@@ -56,6 +51,7 @@ function parseTitle(magnetUri) {
     let season = ptt.season;
     let episodes = [];
 
+    // Prioritize our custom patterns
     for (const pattern of PARSING_PATTERNS) {
         const match = titleToParse.match(pattern.regex);
         if (match) {
@@ -64,24 +60,23 @@ function parseTitle(magnetUri) {
                 const startEp = parseInt(match[2], 10);
                 const endEp = parseInt(match[3], 10);
                 if (!isNaN(startEp) && !isNaN(endEp)) {
-                    for (let i = startEp; i <= endEp; i++) { episodes.push(i); }
+                    episodes = Array.from({ length: endEp - startEp + 1 }, (_, i) => startEp + i);
                 }
             } else if (pattern.type === 'SINGLE_EPISODE') {
                 const ep = parseInt(match[2], 10);
                 if (!isNaN(ep)) { episodes.push(ep); }
             }
-            // For SEASON_PACK, we just need the season, episodes remain empty.
-            
+            // If we got a valid result, break the loop
             if (season && (episodes.length > 0 || pattern.type === 'SEASON_PACK')) {
-                break; // We found a definitive match, stop processing.
+                break;
             }
         }
     }
 
-    // If after all our regexes we have nothing, do one last check on the ptt result
-    if (!season && episodes.length === 0 && ptt.episode) {
-        season = ptt.season || 1;
-        episodes.push(ptt.episode);
+    // If our regexes failed, trust the ptt library as a last resort
+    if (!season && episodes.length === 0) {
+        if (ptt.season) season = ptt.season;
+        if (ptt.episode) episodes.push(ptt.episode);
     }
     
     const resolution = ptt.resolution || 'N/A';
@@ -112,16 +107,34 @@ function getLanguages(title, pttLangs = []) {
     return languages.size > 0 ? Array.from(languages) : ['en'];
 }
 
+// --- The Definitive, Smart Normalizer ---
 function normalizeBaseTitle(title) {
     if (!title) return '';
+    
+    // First, use the library to get a semi-clean title
     const ptt = parse(title);
     let cleanTitle = ptt.title && ptt.title.length > 3 ? ptt.title : title;
     
-    cleanTitle = cleanTitle.replace(/\b((19|20)\d{2}|S\d+|Season\s*\d+|E\d+|Episode\s*\d+)\b.*$/i, '');
-    cleanTitle = cleanTitle.replace(/\[[^\]]+\]/g, '');
-    cleanTitle = cleanTitle.replace(/[()]/g, '');
+    // Aggressively remove season/episode info and years first
+    cleanTitle = cleanTitle.replace(/\b(S\d+|Season\s*\d+|E\d+|Episode\s*\d+)\b/gi, '');
+    cleanTitle = cleanTitle.replace(/\b((19|20)\d{2})\b/g, '');
 
-    return cleanTitle.trim().toLowerCase();
+    // Remove bracketed content like [1080p], [Tamil + Eng], etc.
+    cleanTitle = cleanTitle.replace(/\[[^\]]+\]/g, '');
+    // Remove parenthesized content that often contains junk
+    cleanTitle = cleanTitle.replace(/\([^)]+\)/g, '');
+    
+    // Now, do a final cleanup of remaining junk characters, but be more careful
+    // Keep letters, numbers, and specific characters like ':' and '.' that are part of titles
+    cleanTitle = cleanTitle
+        .replace(/[...]/g, ' ') // Replace ellipses with a space
+        .replace(/[-_]/g, ' ') // Replace hyphens and underscores with spaces
+        .trim();
+
+    // Collapse multiple spaces into one
+    cleanTitle = cleanTitle.replace(/\s+/g, ' ');
+
+    return cleanTitle.toLowerCase();
 }
 
 module.exports = { parseTitle, normalizeBaseTitle };
