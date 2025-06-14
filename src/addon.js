@@ -6,7 +6,6 @@ const dataManager = require('./database/dataManager');
 const config = require('./utils/config');
 const logger = require('./utils/logger');
 const redis = require('./database/redis');
-const { findByImdbId } = require('./utils/tmdb');
 
 const app = express();
 app.use(cors());
@@ -17,13 +16,11 @@ app.use((req, res, next) => {
 
 const MANIFEST = {
     id: 'tamilblasters.series.hybrid',
-    version: '3.0.0', // Major version for new architecture
+    version: '3.1.0', // Final feature enhancement
     name: 'TamilBlasters Hybrid',
-    description: 'Provides a custom catalog and P2P streams for TV Series from the 1TamilBlasters forum.',
+    description: 'Provides a custom catalog and intelligently filtered P2P streams for TV Series from the 1TamilBlasters forum.',
     types: ['series'],
-    // We now provide our own catalog AND act as a stream provider for others.
     resources: ['catalog', 'stream'],
-    
     catalogs: [
         {
             type: 'series',
@@ -31,10 +28,7 @@ const MANIFEST = {
             name: 'TamilBlasters Catalog'
         }
     ],
-    
-    // We explicitly state we can handle both ID prefixes.
     idPrefixes: ['tt', 'tmdb'],
-    
     behaviorHints: {
         configurable: false,
         configurationRequired: false
@@ -45,14 +39,12 @@ app.get('/manifest.json', (req, res) => {
     res.json(MANIFEST);
 });
 
-// The new custom catalog endpoint
 app.get('/catalog/series/tamilblasters-custom.json', async (req, res) => {
     logger.info('Request for custom catalog received.');
     const metas = await dataManager.getCustomCatalog();
     res.json({ metas });
 });
 
-// The universal stream handler remains the same
 app.get('/stream/series/:id.json', async (req, res) => {
     const { id } = req.params;
     logger.info(`Stream request for id: ${id}`);
@@ -60,12 +52,18 @@ app.get('/stream/series/:id.json', async (req, res) => {
     const idParts = id.split(':');
     const sourceId = idParts[0];
 
-    let tmdbId = null;
+    // Extract season and episode numbers from the request ID (e.g., tt12345:1:6)
+    const requestedSeason = idParts[1] ? parseInt(idParts[1], 10) : null;
+    const requestedEpisode = idParts[2] ? parseInt(idParts[2], 10) : null;
+    logger.info({ sourceId, requestedSeason, requestedEpisode }, 'Parsed request ID');
 
+    let tmdbId = null;
     if (sourceId.startsWith('tt')) {
-        logger.info({ imdbId: sourceId }, 'IMDb ID detected, looking up in local Redis map...');
         tmdbId = await dataManager.getTmdbIdByImdbId(sourceId);
     } else if (sourceId === 'tmdb') {
+        // When the ID is tmdb:*, the season/episode info isn't included in the ID itself.
+        // The request for a specific episode comes from a meta object that has that info.
+        // For now, our logic primarily relies on the tt*:S:E format for episode filtering.
         tmdbId = idParts[1];
     }
 
@@ -74,16 +72,17 @@ app.get('/stream/series/:id.json', async (req, res) => {
         return res.json({ streams: [] });
     }
 
-    const streams = await dataManager.getStreamsByTmdbId(tmdbId);
+    // Pass the requested season/episode to the dataManager for intelligent filtering.
+    const streams = await dataManager.getStreamsByTmdbId(tmdbId, requestedSeason, requestedEpisode);
+    
     if (!streams || streams.length === 0) {
-        logger.warn({ tmdbId }, 'No streams found in our database for this TMDb ID.');
+        logger.warn({ tmdbId, requestedSeason, requestedEpisode }, 'No matching streams found in our database.');
         return res.json({ streams: [] });
     }
 
-    logger.info({ tmdbId, count: streams.length }, 'Returning streams.');
+    logger.info({ tmdbId, count: streams.length }, 'Returning filtered streams.');
     res.json({ streams });
 });
-
 
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
@@ -107,7 +106,7 @@ app.get('/debug/redis/:key', async (req, res) => {
             case 'string':
                 data = await redis.get(key);
                 break;
-            case 'zset': // Added support for sorted sets
+            case 'zset':
                  data = await redis.zrevrange(key, 0, -1, 'WITHSCORES');
                  break;
             case 'none':
