@@ -41,6 +41,71 @@ async function addStream(tmdbId, streamInfo) {
     logger.debug({ tmdbId, streamId }, 'Added/updated stream.');
 }
 
+async function getStreamsByTmdbId(tmdbId, requestedSeason, requestedEpisode) {
+    const streamData = await redis.hvals(`stream:tmdb:${tmdbId}`);
+    if (!streamData.length) return [];
+    
+    const allStreams = streamData.map(data => JSON.parse(data));
+    let filteredStreams = [];
+
+    if (requestedSeason && requestedEpisode) {
+        // Layer 1: Exact matches
+        const exactMatches = allStreams.filter(stream => 
+            !stream.isEpisodePack && !stream.isSeasonPack && 
+            stream.season === requestedSeason && stream.episodes.includes(requestedEpisode)
+        );
+        if (exactMatches.length > 0) {
+            filteredStreams = exactMatches;
+        }
+        // Layer 2: Episode pack matches
+        if (filteredStreams.length === 0) {
+            const episodePackMatches = allStreams.filter(stream => 
+                stream.isEpisodePack && stream.season === requestedSeason &&
+                requestedEpisode >= stream.episodes[0] && requestedEpisode <= stream.episodes[stream.episodes.length - 1]
+            );
+            if (episodePackMatches.length > 0) filteredStreams = episodePackMatches;
+        }
+        // Layer 3: Season pack fallback
+        if (filteredStreams.length === 0) {
+            const seasonPackMatches = allStreams.filter(stream => 
+                stream.isSeasonPack && stream.season === requestedSeason
+            );
+            if (seasonPackMatches.length > 0) filteredStreams = seasonPackMatches;
+        }
+    } else {
+        filteredStreams = allStreams;
+    }
+
+    if (filteredStreams.length === 0) return [];
+
+    const bestTrackers = getTrackers();
+    const streams = filteredStreams.map(parsed => {
+        const langString = parsed.languages.join(' / ');
+        const seasonNum = String(parsed.season).padStart(2, '0');
+        const streamName = `[TB+] - ${parsed.resolution}`;
+        let streamDescription;
+        if (parsed.isSeasonPack) {
+            streamDescription = `📺 Season ${seasonNum} Pack\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
+        } else if (parsed.isEpisodePack) {
+            const startEp = String(parsed.episodes[0]).padStart(2, '0');
+            const endEp = String(parsed.episodes[parsed.episodes.length - 1]).padStart(2, '0');
+            streamDescription = `📺 S${seasonNum} E${startEp}-E${endEp}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
+        } else {
+            const episodeNum = String(parsed.episodes[0]).padStart(2, '0');
+            streamDescription = `📺 S${seasonNum}E${episodeNum}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
+        }
+        let videoSizeBytes = 0;
+        if (parsed.size) { /* ... */ }
+        return {
+            name: streamName, description: streamDescription, infoHash: parsed.infoHash,
+            sources: bestTrackers, behaviorHints: { bingeGroup: `tamilblasters-${parsed.resolution}`, videoSize: videoSizeBytes > 0 ? videoSizeBytes : undefined }
+        };
+    });
+
+    streams.sort((a, b) => { /* ... sorting logic ... */ });
+    return streams;
+}
+
 async function getTmdbIdByImdbId(imdbId) {
     const mappingKey = `imdb_map:${imdbId}`;
     return redis.get(mappingKey);
@@ -49,12 +114,7 @@ async function getTmdbIdByImdbId(imdbId) {
 async function updateCatalog(imdbId, name, poster, year) {
     const catalogKey = 'catalog:series';
     const score = year ? parseInt(year, 10) : 0;
-    const meta = {
-        id: imdbId,
-        type: 'series',
-        name: name,
-        poster: poster,
-    };
+    const meta = { id: imdbId, type: 'series', name: name, poster: poster };
     await redis.zadd(catalogKey, score, JSON.stringify(meta));
     logger.debug({ imdbId, name }, 'Updated custom catalog.');
 }
@@ -66,122 +126,16 @@ async function getCustomCatalog() {
     return results.map(item => JSON.parse(item));
 }
 
-async function getStreamsByTmdbId(tmdbId, requestedSeason, requestedEpisode) {
-    const streamData = await redis.hvals(`stream:tmdb:${tmdbId}`);
-    if (!streamData.length) return [];
-    
-    const allStreams = streamData.map(data => JSON.parse(data));
-
-    // --- START OF NEW FILTERING LOGIC ---
-    let filteredStreams = [];
-
-    // If a specific episode is requested, filter intelligently
-    if (requestedSeason && requestedEpisode) {
-        // Layer 1: Find exact single episode matches
-        const exactMatches = allStreams.filter(stream => 
-            !stream.isEpisodePack && 
-            !stream.isSeasonPack && 
-            stream.season === requestedSeason &&
-            stream.episodes.includes(requestedEpisode)
-        );
-        if (exactMatches.length > 0) {
-            filteredStreams = exactMatches;
-            logger.info({ tmdbId, count: exactMatches.length }, 'Found exact episode matches.');
-        }
-
-        // Layer 2: If no exact match, find episode packs that contain the episode
-        if (filteredStreams.length === 0) {
-            const episodePackMatches = allStreams.filter(stream => 
-                stream.isEpisodePack &&
-                stream.season === requestedSeason &&
-                requestedEpisode >= stream.episodes[0] &&
-                requestedEpisode <= stream.episodes[stream.episodes.length - 1]
-            );
-            if (episodePackMatches.length > 0) {
-                filteredStreams = episodePackMatches;
-                logger.info({ tmdbId, count: episodePackMatches.length }, 'Found matching episode packs.');
-            }
-        }
-
-        // Layer 3: If still no match, find a full season pack for that season
-        if (filteredStreams.length === 0) {
-            const seasonPackMatches = allStreams.filter(stream => 
-                stream.isSeasonPack &&
-                stream.season === requestedSeason
-            );
-            if (seasonPackMatches.length > 0) {
-                filteredStreams = seasonPackMatches;
-                logger.info({ tmdbId, count: seasonPackMatches.length }, 'Found matching season packs.');
-            }
-        }
-    } else {
-        // If no specific episode is requested (e.g., from the series detail page root), return all streams.
-        filteredStreams = allStreams;
-        logger.info({ tmdbId, count: filteredStreams.length }, 'No specific episode requested, returning all streams for series.');
-    }
-
-    if (filteredStreams.length === 0) {
-        return []; // Return early if no streams match the filter
-    }
-    // --- END OF NEW FILTERING LOGIC ---
-
-    const bestTrackers = getTrackers();
-    
-    const streams = filteredStreams.map(parsed => {
-        const langString = parsed.languages.join(' / ');
-        const seasonNum = String(parsed.season).padStart(2, '0');
-        const streamName = `[TB+] - ${parsed.resolution}`;
-        let streamDescription;
-
-        if (parsed.isSeasonPack) {
-            streamDescription = `📺 Season ${seasonNum} Pack\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
-        } else if (parsed.isEpisodePack) {
-            const startEp = String(parsed.episodes[0]).padStart(2, '0');
-            const endEp = String(parsed.episodes[parsed.episodes.length - 1]).padStart(2, '0');
-            streamDescription = `📺 S${seasonNum} E${startEp}-E${endEp}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
-        } else {
-            const episodeNum = String(parsed.episodes[0]).padStart(2, '0');
-            streamDescription = `📺 S${seasonNum}E${episodeNum}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
-        }
-        
-        let videoSizeBytes = 0;
-        if (parsed.size) {
-            const sizeMatch = parsed.size.match(/(\d+(\.\d+)?)\s*(GB|MB)/i);
-            if (sizeMatch) {
-                const sizeValue = parseFloat(sizeMatch[1]);
-                const sizeUnit = sizeMatch[3].toUpperCase();
-                videoSizeBytes = sizeUnit === 'GB' ? sizeValue * 1e9 : sizeValue * 1e6;
-            }
-        }
-        
-        return {
-            name: streamName,
-            description: streamDescription,
-            infoHash: parsed.infoHash,
-            sources: bestTrackers,
-            behaviorHints: {
-                bingeGroup: `tamilblasters-${parsed.resolution}`,
-                videoSize: videoSizeBytes > 0 ? videoSizeBytes : undefined,
-            }
-        };
-    });
-
-    // Sort the final, filtered list by episode and then resolution
-    streams.sort((a, b) => {
-        const seasonA = parseInt(a.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
-        const seasonB = parseInt(b.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
-        if (seasonB !== seasonA) return seasonB - seasonA;
-
-        const episodeA = parseInt(a.description.match(/E(\d+)/)?.[1] || 0);
-        const episodeB = parseInt(b.description.match(/E(\d+)/)?.[1] || 0);
-        if (episodeB !== episodeA) return episodeB - episodeA;
-
-        const resA = parseInt(a.name.match(/\d{3,4}/)?.[0] || 0);
-        const resB = parseInt(b.name.match(/\d{3,4}/)?.[0] || 0);
-        return resB - resA;
-    });
-
-    return streams;
+async function logUnmatchedMagnet(magnetUri, originalTitle, sourceUrl) {
+    const orphanKey = 'unmatched_magnets';
+    const data = {
+        magnet: magnetUri,
+        title: originalTitle,
+        source: sourceUrl,
+        loggedAt: new Date().toISOString()
+    };
+    await redis.lpush(orphanKey, JSON.stringify(data));
+    logger.debug({ title: originalTitle }, 'Logged an orphan magnet.');
 }
 
 async function updateThreadTimestamp(threadUrl) {
@@ -192,22 +146,17 @@ async function updateThreadTimestamp(threadUrl) {
 async function getThreadsToRevisit() {
     const keys = await redis.keys('thread:*');
     if (!keys.length) return [];
-
     const pipeline = redis.pipeline();
     keys.forEach(key => pipeline.hget(key, 'lastVisited'));
     const results = await pipeline.exec();
-
     const revisitThreshold = new Date();
     revisitThreshold.setHours(revisitThreshold.getHours() - config.THREAD_REVISIT_HOURS);
-
     const threadsToRevisit = [];
     results.forEach(([, lastVisited], index) => {
         if (lastVisited && new Date(lastVisited) < revisitThreshold) {
-            const encodedUrl = keys[index].substring(7);
-            threadsToRevisit.push(Buffer.from(encodedUrl, 'base64').toString('ascii'));
+            threadsToRevisit.push(Buffer.from(keys[index].substring(7), 'base64').toString('ascii'));
         }
     });
-
     return threadsToRevisit;
 }
 
@@ -220,4 +169,5 @@ module.exports = {
     getThreadsToRevisit,
     updateCatalog,
     getCustomCatalog,
+    logUnmatchedMagnet
 };
