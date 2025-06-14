@@ -6,22 +6,20 @@ const { getTrackers } = require('../utils/trackers');
 const config = require('../utils/config');
 
 // NEW SCHEMA:
-// show_map:{baseTitle}:{year} -> tmdbId (e.g., show_map:la-brea:2022 -> 126154)
-// show_map:{baseTitle} -> tmdbId (e.g., show_map:and-just-like-that -> 117621)
+// imdb_map:{imdbId} -> tmdbId (e.g., imdb_map:tt10919420 -> 122294)
 // stream:tmdb:{tmdbId} -> HASH of all streams for that show
 
-async function findOrCreateShow(baseTitle, year, tmdbId) {
-    // We create mappings from our title/year to the official TMDb ID.
-    // This allows us to find the TMDb ID again in the future if we only have the title.
-    const mappingKeyWithYear = `show_map:${baseTitle}:${year}`;
-    const mappingKeyWithoutYear = `show_map:${baseTitle}`;
+async function findOrCreateShow(tmdbId, imdbId) {
+    // We store the IMDb ID -> TMDb ID mapping.
+    // This is the only "show" data we need to persist for lookups.
+    const mappingKey = `imdb_map:${imdbId}`;
     
-    const pipeline = redis.pipeline();
-    pipeline.set(mappingKeyWithYear, tmdbId, 'EX', 60 * 60 * 24 * 30); // Expire in 30 days
-    pipeline.set(mappingKeyWithoutYear, tmdbId, 'EX', 60 * 60 * 24 * 30);
-    await pipeline.exec();
-    
-    logger.info({ title: baseTitle, year, tmdbId }, 'Created/refreshed mapping to TMDb ID.');
+    const existingTmdbId = await redis.get(mappingKey);
+    // Only set if it doesn't exist or if the mapping is somehow incorrect (unlikely)
+    if (!existingTmdbId || existingTmdbId !== tmdbId.toString()) {
+        await redis.set(mappingKey, tmdbId);
+        logger.info({ imdbId, tmdbId }, 'Created/refreshed IMDb to TMDb mapping.');
+    }
 }
 
 async function addStream(tmdbId, streamInfo) {
@@ -46,7 +44,6 @@ async function addStream(tmdbId, streamInfo) {
     }
 
     const streamId = `${infoHash}:${streamIdSuffix}:${resolution}`;
-    // The stream key is now based on the TMDb ID
     const streamKey = `stream:tmdb:${tmdbId}`;
 
     const streamData = JSON.stringify({
@@ -108,7 +105,6 @@ async function getStreamsByTmdbId(tmdbId) {
         };
     });
 
-    // Sort by season, then episode, then resolution
     streams.sort((a, b) => {
         const seasonA = parseInt(a.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
         const seasonB = parseInt(b.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
@@ -124,6 +120,12 @@ async function getStreamsByTmdbId(tmdbId) {
     });
 
     return streams;
+}
+
+async function getTmdbIdByImdbId(imdbId) {
+    const mappingKey = `imdb_map:${imdbId}`;
+    const tmdbId = await redis.get(mappingKey);
+    return tmdbId;
 }
 
 async function updateThreadTimestamp(threadUrl) {
@@ -157,6 +159,7 @@ module.exports = {
     findOrCreateShow,
     addStream,
     getStreamsByTmdbId,
+    getTmdbIdByImdbId,
     updateThreadTimestamp,
     getThreadsToRevisit
 };
