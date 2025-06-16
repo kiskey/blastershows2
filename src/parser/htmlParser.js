@@ -8,12 +8,6 @@ const logger = require('../utils/logger');
 const window = new JSDOM('').window;
 const DOMPurify = createDOMPurify(window);
 
-/**
- * Parses the HTML of a thread page to extract title, poster, and magnet links.
- * @param {string} html - The raw HTML of the page.
- * @param {string} url - The URL of the page, for logging purposes.
- * @returns {object|null} An object with parsed data or null if essential data is missing.
- */
 function parseThreadPage(html, url) {
     try {
         const $ = cheerio.load(html);
@@ -29,15 +23,24 @@ function parseThreadPage(html, url) {
             posterUrl = 'https:' + posterUrl;
         }
 
-        // This robust selector finds any <a> tag whose href starts with "magnet:".
         const magnets = [];
         $('a[href^="magnet:"]').each((i, elem) => {
-            const magnetUri = $(elem).attr('href');
+            let magnetUri = $(elem).attr('href');
             
-            if (magnetUri && magnetUri.startsWith('magnet:?xt=urn:btih:')) {
-                const sanitizedUri = DOMPurify.sanitize(magnetUri);
-                magnets.push(sanitizedUri);
+            // --- START OF FIX for concatenated magnets ---
+            // Split the href attribute by 'magnet:?' to handle multiple URIs in one attribute
+            const potentialMagnets = magnetUri.split('magnet:?').filter(Boolean);
+            
+            for (let part of potentialMagnets) {
+                // Re-add the prefix to make it a valid URI again
+                const singleMagnet = 'magnet:?' + part.trim();
+                
+                if (singleMagnet.startsWith('magnet:?xt=urn:btih:')) {
+                    const sanitizedUri = DOMPurify.sanitize(singleMagnet);
+                    magnets.push(sanitizedUri);
+                }
             }
+            // --- END OF FIX ---
         });
 
         if (magnets.length === 0) {
@@ -47,7 +50,7 @@ function parseThreadPage(html, url) {
         return {
             title,
             posterUrl,
-            magnets,
+            magnets: [...new Set(magnets)], // Ensure final list is unique
             timestamp: new Date().toISOString(),
         };
     } catch (error) {
