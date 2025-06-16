@@ -10,7 +10,6 @@ const { searchOmdb } = require('../utils/omdb');
 const config = require('../utils/config');
 const logger = require('../utils/logger');
 
-
 async function fetchThreadHtml(url) {
     try {
         const { data } = await axios.get(url, {
@@ -37,20 +36,24 @@ async function processThread(threadUrl) {
             return;
         }
 
-        // --- CORRECT LOGIC RESTORED ---
-        // 1. Use the THREAD TITLE as the source of truth for the show's identity.
+        // --- THE CORRECT LOGIC RESTORED ---
+        // 1. Get the base title and year ONCE from the clean THREAD TITLE.
         const baseTitle = normalizeBaseTitle(threadData.title);
         const yearMatch = threadData.title.match(/\b(19|20)\d{2}\b/);
         const year = yearMatch ? yearMatch[0] : null;
 
         if (!baseTitle) {
             logger.warn({ threadTitle: threadData.title }, 'Could not normalize a base title from thread.');
+            // This thread is unmatchable, log all its magnets as orphans
+            for (const magnetUri of threadData.magnets) {
+                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl);
+            }
             return;
         }
 
         let metaResult = { tmdbId: null, imdbId: null, poster: null, name: baseTitle, year: year };
 
-        // 2. Check our cache first to avoid redundant API calls
+        // 2. Check our cache for this title to avoid API calls
         const cachedTmdbId = await dataManager.findCachedTmdbId(baseTitle, year);
         if (cachedTmdbId) {
             metaResult.tmdbId = cachedTmdbId;
@@ -62,18 +65,15 @@ async function processThread(threadUrl) {
                 metaResult.year = details.first_air_date ? details.first_air_date.substring(0, 4) : year;
             }
         } else {
-            // 3. If not cached, perform the full API waterfall to find metadata
+            // 3. If not cached, perform the full API waterfall
             const tmdbSearch = await searchTv(baseTitle, year);
             if (tmdbSearch && tmdbSearch.id) {
                 const details = await getTvDetails(tmdbSearch.id);
                 if (details && details.imdbId) {
-                    metaResult = { ...metaResult, ...details }; // Spread details to get tmdbId and imdbId
+                    metaResult = { ...metaResult, ...details };
                     metaResult.poster = details.poster_path ? `https://image.tmdb.org/t/p/w500${details.poster_path}` : null;
-                    metaResult.name = details.name;
-                    metaResult.year = details.first_air_date ? details.first_air_date.substring(0, 4) : year;
                 }
             }
-            
             if (!metaResult.imdbId) {
                 const omdbSearch = await searchOmdb(baseTitle);
                 if (omdbSearch && omdbSearch.imdbId) {
@@ -81,22 +81,17 @@ async function processThread(threadUrl) {
                     metaResult.poster = metaResult.poster || omdbSearch.poster;
                     metaResult.name = omdbSearch.title;
                     metaResult.year = omdbSearch.year;
-                    
                     const details = await getTvDetails(metaResult.imdbId);
-                    if(details && details.tmdbId) {
-                        metaResult.tmdbId = details.tmdbId;
-                    }
+                    if(details && details.tmdbId) metaResult.tmdbId = details.tmdbId;
                 }
             }
         }
 
-        // 4. Final check: If we have IDs, process. Otherwise, log orphans.
+        // 4. Final check and store data
         if (metaResult.imdbId && metaResult.tmdbId) {
-            // Create mappings in DB
             await dataManager.findOrCreateShow(metaResult.tmdbId, metaResult.imdbId, baseTitle, year);
             await dataManager.updateCatalog(metaResult.imdbId, metaResult.name, metaResult.poster, metaResult.year);
-            
-            // Now, loop through the magnets and add them using their own parsed info
+            // NOW, loop through the magnets and add them to the TMDb ID we just found.
             for (const magnetUri of threadData.magnets) {
                 const parsedStream = parseTitle(magnetUri);
                 if (parsedStream) {
@@ -104,8 +99,7 @@ async function processThread(threadUrl) {
                 }
             }
         } else {
-            // If the entire thread couldn't be matched, log all its magnets as orphans
-            logger.warn({ title: baseTitle }, "Could not resolve show. Logging magnets as orphans.");
+            logger.warn({ title: baseTitle }, "Could not resolve show via APIs. Logging magnets as orphans.");
             for (const magnetUri of threadData.magnets) {
                 await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl);
             }
@@ -118,7 +112,6 @@ async function processThread(threadUrl) {
     }
 }
 
-// --- Worker main loop is unchanged ---
 if (!parentPort) {
     process.exit();
 }
