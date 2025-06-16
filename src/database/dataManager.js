@@ -176,16 +176,18 @@ async function getCustomCatalog() {
     return results.map(item => JSON.parse(item));
 }
 
-async function logUnmatchedMagnet(magnetUri, originalTitle, sourceUrl) {
+async function logUnmatchedMagnet(magnetUri, originalTitle, sourceUrl, reason) {
     const orphanKey = 'unmatched_magnets';
     const data = {
         magnet: magnetUri,
         title: originalTitle,
         source: sourceUrl,
+        reason: reason,
+        attempts: 1, // First time it's logged, attempts is 1
         loggedAt: new Date().toISOString()
     };
     await redis.lpush(orphanKey, JSON.stringify(data));
-    logger.debug({ title: originalTitle }, 'Logged an orphan magnet.');
+    logger.debug({ title: originalTitle, reason }, 'Logged an orphan magnet.');
 }
 
 async function updateThreadTimestamp(threadUrl) {
@@ -214,12 +216,9 @@ async function getThreadsToRevisit() {
 }
 
 
-// --- START OF THE NEW RESCUE FUNCTION ---
-/**
- * Scans the orphan list and tries to match them against already known shows.
- */
+// --- `rescueOrphanedMagnets` is now much smarter ---
 async function rescueOrphanedMagnets() {
-    logger.info('Starting orphan rescue background job...');
+    logger.info('Starting advanced orphan rescue job...');
     const orphanKey = 'unmatched_magnets';
     const allOrphans = await redis.lrange(orphanKey, 0, -1);
 
@@ -228,18 +227,13 @@ async function rescueOrphanedMagnets() {
         return;
     }
 
-    // 1. Get all known show mappings
     const showMapKeys = await redis.keys('show_map:*');
     const knownTitles = new Map();
     if (showMapKeys.length > 0) {
-        const pipeline = redis.pipeline();
-        showMapKeys.forEach(key => pipeline.get(key));
-        const tmdbIds = await pipeline.exec();
-
+        const tmdbIds = await redis.mget(showMapKeys);
         showMapKeys.forEach((key, index) => {
-            // Key is like "show_map:suits-la:2025" or "show_map:squid-game"
             const title = key.split(':').slice(1, -1).join(':') || key.split(':').slice(1).join(':');
-            const tmdbId = tmdbIds[index][1];
+            const tmdbId = tmdbIds[index];
             if (title && tmdbId) {
                 knownTitles.set(title, tmdbId);
             }
@@ -247,36 +241,53 @@ async function rescueOrphanedMagnets() {
     }
     
     if (knownTitles.size === 0) {
-        logger.info('No known shows in cache to match against.');
+        logger.warn('Orphan rescue job: No known shows in cache to match against.');
         return;
     }
 
     let rescuedCount = 0;
+    const updatedOrphans = [];
+
     for (const orphanString of allOrphans) {
-        const orphan = JSON.parse(orphanString);
-        const parsedStream = parseTitle(orphan.magnet);
-        if (!parsedStream) continue;
+        let orphan = JSON.parse(orphanString);
+        let rescued = false;
 
-        const baseTitle = normalizeBaseTitle(parsedStream.name);
+        const baseTitle = normalizeBaseTitle(orphan.title);
 
-        // 2. Check if the orphan's base title matches a known show
         if (knownTitles.has(baseTitle)) {
             const tmdbId = knownTitles.get(baseTitle);
-            logger.info({ title: baseTitle, tmdbId }, 'Rescuing orphan! Found a match in cache.');
-            
-            // 3. Add the stream to the correct show
-            await addStream(tmdbId, parsedStream);
-            
-            // 4. Remove it from the orphan list
-            await redis.lrem(orphanKey, 0, orphanString);
-            rescuedCount++;
+            const imdbId = await redis.get(`tmdb_map:${tmdbId}`); // Assuming we store a reverse map
+
+            if (tmdbId) {
+                logger.info({ title: baseTitle, tmdbId }, 'Rescuing orphan! Found a match in cache.');
+                const parsedStream = parseTitle(orphan.magnet);
+                if (parsedStream) {
+                    await addStream(tmdbId, parsedStream);
+                    rescuedCount++;
+                    rescued = true;
+                }
+            }
+        }
+
+        if (!rescued) {
+            // If not rescued, increment the attempt counter and keep it in the list
+            orphan.attempts = (orphan.attempts || 1) + 1;
+            updatedOrphans.push(JSON.stringify(orphan));
         }
     }
-
-    logger.info({ rescued: rescuedCount, remaining: allOrphans.length - rescuedCount }, 'Orphan rescue job finished.');
+    
+    // Atomically replace the old orphan list with the new one (containing only un-rescued items)
+    if (allOrphans.length > 0) {
+        const pipeline = redis.pipeline();
+        pipeline.del(orphanKey);
+        if (updatedOrphans.length > 0) {
+            pipeline.rpush(orphanKey, updatedOrphans);
+        }
+        await pipeline.exec();
+    }
+    
+    logger.info({ rescued: rescuedCount, remaining: updatedOrphans.length }, 'Orphan rescue job finished.');
 }
-// --- END OF THE NEW RESCUE FUNCTION ---
-
 module.exports = {
     findOrCreateShow,
     addStream,
