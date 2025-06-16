@@ -111,6 +111,33 @@ async function getTmdbIdByImdbId(imdbId) {
     return redis.get(mappingKey);
 }
 
+// --- START OF NEW FUNCTION ---
+/**
+ * Tries to find a cached TMDb ID from a title and year to avoid API calls.
+ * @param {string} baseTitle
+ * @param {string|null} year
+ * @returns {Promise<string|null>} The cached TMDb ID or null.
+ */
+async function findCachedTmdbId(baseTitle, year) {
+    let mappingKey;
+    if (year) {
+        mappingKey = `show_map:${baseTitle}:${year}`;
+        const tmdbId = await redis.get(mappingKey);
+        if (tmdbId) {
+            logger.debug({ title: baseTitle, year }, 'Found cached TMDb ID with year.');
+            return tmdbId;
+        }
+    }
+    // Fallback to check without year
+    mappingKey = `show_map:${baseTitle}`;
+    const tmdbId = await redis.get(mappingKey);
+    if (tmdbId) {
+        logger.debug({ title: baseTitle }, 'Found cached TMDb ID without year.');
+    }
+    return tmdbId;
+}
+// --- END OF NEW FUNCTION ---
+
 async function updateCatalog(imdbId, name, poster, year) {
     const catalogKey = 'catalog:series';
     const score = year ? parseInt(year, 10) : 0;
@@ -169,5 +196,6 @@ module.exports = {
     getThreadsToRevisit,
     updateCatalog,
     getCustomCatalog,
-    logUnmatchedMagnet
+    logUnmatchedMagnet,
+    findCachedTmdbId, // Export the new function
 };
