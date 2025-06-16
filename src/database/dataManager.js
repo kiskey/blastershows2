@@ -4,7 +4,67 @@ const redis = require('./redis');
 const logger = require('../utils/logger');
 const { getTrackers } = require('../utils/trackers');
 const config = require('../utils/config');
+const fs = require('fs').promises; // Use promises-based fs
+const path = require('path');
 const { parseTitle, normalizeBaseTitle } = require('../parser/titleParser'); // We need this for the rescue op
+
+const HINTS_FILE_PATH = path.join(__dirname, '..', '..', 'search_hints.json');
+const HINTS_KEY = 'search_hints';
+
+
+/**
+ * Loads hints from the JSON file into Redis on startup.
+ */
+async function loadHintsIntoRedis() {
+    try {
+        const fileContent = await fs.readFile(HINTS_FILE_PATH, 'utf-8');
+        const hints = JSON.parse(fileContent);
+        if (Object.keys(hints).length > 0) {
+            await redis.hset(HINTS_KEY, hints);
+            logger.info(`Successfully loaded ${Object.keys(hints).length} hints into Redis.`);
+        }
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            logger.warn('search_hints.json not found. Creating an empty one.');
+            await fs.writeFile(HINTS_FILE_PATH, '{}', 'utf-8');
+        } else {
+            logger.error({ err: error }, 'Failed to load search_hints.json');
+        }
+    }
+}
+
+/**
+ * Adds a new hint to both Redis and the persistent JSON file.
+ * @param {string} title - The normalized title to use as the key.
+ * @param {string} id - The TMDb or IMDb ID (e.g., "tmdb:123" or "tt123").
+ */
+async function addHint(title, id) {
+    try {
+        // Update Redis immediately for instant use
+        await redis.hset(HINTS_KEY, { [title]: id });
+
+        // Update the JSON file for persistence
+        const fileContent = await fs.readFile(HINTS_FILE_PATH, 'utf-8');
+        const hints = JSON.parse(fileContent);
+        hints[title] = id;
+        await fs.writeFile(HINTS_FILE_PATH, JSON.stringify(hints, null, 2), 'utf-8');
+
+        logger.info({ title, id }, 'Successfully added/updated search hint.');
+        return true;
+    } catch (error) {
+        logger.error({ err: error }, 'Failed to add search hint.');
+        return false;
+    }
+}
+
+/**
+ * Gets a hint from the Redis cache.
+ * @param {string} title - The normalized title.
+ * @returns {Promise<string|null>} The TMDb or IMDb ID.
+ */
+async function getHint(title) {
+    return redis.hget(HINTS_KEY, title);
+}
 
 // SCHEMA:
 // imdb_map:{imdbId} -> tmdbId
@@ -319,5 +379,8 @@ module.exports = {
     getCustomCatalog,
     logUnmatchedMagnet,
     findCachedTmdbId,
+     loadHintsIntoRedis,
+    addHint,
+    getHint,
     rescueOrphanedMagnets // Export the new function
 };
