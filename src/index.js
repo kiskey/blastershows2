@@ -12,6 +12,9 @@ require('./utils/apiClient'); // Ensure apiClient is initialized
 async function main() {
     logger.info(`Main process ${process.pid} is starting...`);
 
+      // --- NEW: Load hints into Redis ---
+    await dataManager.loadHintsIntoRedis();
+
     if (config.PURGE_ON_START) {
         logger.warn('PURGE_ON_START is true. Clearing ENTIRE Redis database...');
         await redisClient.flushdb();
