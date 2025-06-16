@@ -1,6 +1,6 @@
 // src/utils/tmdb.js
 
-const apiClient = require('./apiClient'); // Import our new resilient client
+const apiClient = require('./apiClient');
 const config = require('./config');
 const logger = require('./logger');
 
@@ -38,20 +38,29 @@ async function searchTv(title, year) {
     return null;
 }
 
-async function getTvDetails(tmdbId) {
+async function getTvDetails(id) { // Accepts either tmdbId (number) or imdbId (string)
     if (!config.TMDB_API_KEY) return null;
-    const detailsUrl = `${TMDB_API_BASE}/tv/${tmdbId}?api_key=${config.TMDB_API_KEY}&append_to_response=external_ids`;
+
+    const isImdb = id.toString().startsWith('tt');
+    const findUrl = `${TMDB_API_BASE}/${isImdb ? 'find' : 'tv'}/${id}?api_key=${config.TMDB_API_KEY}${isImdb ? '&external_source=imdb_id' : '&append_to_response=external_ids'}`;
+
     try {
-        const { data } = await apiClient.get(detailsUrl, { timeout: 7000 });
-        const imdbId = data.external_ids ? data.external_ids.imdb_id : null;
-        if (imdbId) {
-            logger.info({ tmdbId, imdbId }, 'Fetched TV details and found IMDb ID.');
-            return { tmdbId, imdbId };
-        } else {
-             logger.warn({ tmdbId }, 'TV Details fetched but no IMDb ID was present.');
+        const { data } = await apiClient.get(findUrl, { timeout: 7000 });
+        
+        const results = isImdb ? data.tv_results : [data];
+        
+        if (results && results.length > 0) {
+            const show = results[0];
+            const imdbId = isImdb ? id : (show.external_ids ? show.external_ids.imdb_id : null);
+            const tmdbId = show.id;
+
+            if (imdbId && tmdbId) {
+                logger.info({ tmdbId, imdbId }, 'Fetched TV details and confirmed ID pair.');
+                return { tmdbId, imdbId, name: show.name, poster_path: show.poster_path, first_air_date: show.first_air_date };
+            }
         }
     } catch (e) {
-        logger.error({ err: e.message, tmdbId }, 'Final attempt to get TV details from TMDb failed.');
+        logger.error({ err: e.message, id }, 'Final attempt to get TV details from TMDb failed.');
     }
     return null;
 }
