@@ -10,6 +10,7 @@ const { searchOmdb } = require('../utils/omdb');
 const config = require('../utils/config');
 const logger = require('../utils/logger');
 
+
 async function fetchThreadHtml(url) {
     try {
         const { data } = await axios.get(url, {
@@ -36,76 +37,77 @@ async function processThread(threadUrl) {
             return;
         }
 
-        // Process EACH magnet individually, as its title may differ from the thread title.
-        for (const magnetUri of threadData.magnets) {
-            // 1. Parse the magnet's own title first to get its specific info
-            const parsedStream = parseTitle(magnetUri);
-            if (!parsedStream) {
-                logger.warn({ magnet: magnetUri, source: threadUrl }, 'Skipping malformed magnet URI.');
-                continue; // Skip to the next magnet
+        // --- CORRECT LOGIC RESTORED ---
+        // 1. Use the THREAD TITLE as the source of truth for the show's identity.
+        const baseTitle = normalizeBaseTitle(threadData.title);
+        const yearMatch = threadData.title.match(/\b(19|20)\d{2}\b/);
+        const year = yearMatch ? yearMatch[0] : null;
+
+        if (!baseTitle) {
+            logger.warn({ threadTitle: threadData.title }, 'Could not normalize a base title from thread.');
+            return;
+        }
+
+        let metaResult = { tmdbId: null, imdbId: null, poster: null, name: baseTitle, year: year };
+
+        // 2. Check our cache first to avoid redundant API calls
+        const cachedTmdbId = await dataManager.findCachedTmdbId(baseTitle, year);
+        if (cachedTmdbId) {
+            metaResult.tmdbId = cachedTmdbId;
+            const details = await getTvDetails(cachedTmdbId);
+            if (details) {
+                metaResult.imdbId = details.imdbId;
+                metaResult.poster = details.poster_path ? `https://image.tmdb.org/t/p/w500${details.poster_path}` : null;
+                metaResult.name = details.name;
+                metaResult.year = details.first_air_date ? details.first_air_date.substring(0, 4) : year;
             }
-
-            const baseTitle = normalizeBaseTitle(parsedStream.name);
-            const year = parsedStream.year;
-
-            if (!baseTitle) {
-                logger.warn({ magnetName: parsedStream.name }, 'Could not normalize a base title from magnet, logging as orphan.');
-                await dataManager.logUnmatchedMagnet(magnetUri, parsedStream.name, threadUrl);
-                continue;
-            }
-            
-            let metaResult = { tmdbId: null, imdbId: null, poster: null, name: baseTitle, year: year };
-
-            // 2. Check our cache first to avoid redundant API calls
-            const cachedTmdbId = await dataManager.findCachedTmdbId(baseTitle, year);
-            if (cachedTmdbId) {
-                metaResult.tmdbId = cachedTmdbId;
-                // We still need the IMDb ID for mapping, so we get details
-                const details = await getTvDetails(cachedTmdbId);
-                if (details) {
-                    metaResult.imdbId = details.imdbId;
+        } else {
+            // 3. If not cached, perform the full API waterfall to find metadata
+            const tmdbSearch = await searchTv(baseTitle, year);
+            if (tmdbSearch && tmdbSearch.id) {
+                const details = await getTvDetails(tmdbSearch.id);
+                if (details && details.imdbId) {
+                    metaResult = { ...metaResult, ...details }; // Spread details to get tmdbId and imdbId
                     metaResult.poster = details.poster_path ? `https://image.tmdb.org/t/p/w500${details.poster_path}` : null;
                     metaResult.name = details.name;
                     metaResult.year = details.first_air_date ? details.first_air_date.substring(0, 4) : year;
                 }
-            } else {
-                // 3. If not in cache, perform the full API waterfall
-                const tmdbSearch = await searchTv(baseTitle, year);
-                if (tmdbSearch && tmdbSearch.id) {
-                    const details = await getTvDetails(tmdbSearch.id);
-                    if (details && details.imdbId) {
+            }
+            
+            if (!metaResult.imdbId) {
+                const omdbSearch = await searchOmdb(baseTitle);
+                if (omdbSearch && omdbSearch.imdbId) {
+                    metaResult.imdbId = omdbSearch.imdbId;
+                    metaResult.poster = metaResult.poster || omdbSearch.poster;
+                    metaResult.name = omdbSearch.title;
+                    metaResult.year = omdbSearch.year;
+                    
+                    const details = await getTvDetails(metaResult.imdbId);
+                    if(details && details.tmdbId) {
                         metaResult.tmdbId = details.tmdbId;
-                        metaResult.imdbId = details.imdbId;
-                        metaResult.poster = details.poster_path ? `https://image.tmdb.org/t/p/w500${details.poster_path}` : null;
-                        metaResult.name = details.name;
-                        metaResult.year = details.first_air_date ? details.first_air_date.substring(0, 4) : year;
-                    }
-                }
-                
-                if (!metaResult.imdbId) {
-                    const omdbSearch = await searchOmdb(baseTitle);
-                    if (omdbSearch && omdbSearch.imdbId) {
-                        metaResult.imdbId = omdbSearch.imdbId;
-                        metaResult.poster = metaResult.poster || omdbSearch.poster;
-                        metaResult.name = omdbSearch.title;
-                        metaResult.year = omdbSearch.year;
-                        
-                        // Correctly use the found IMDb ID to get the TMDb ID
-                        const details = await getTvDetails(metaResult.imdbId);
-                        if(details && details.tmdbId) {
-                            metaResult.tmdbId = details.tmdbId;
-                        }
                     }
                 }
             }
+        }
 
-            // 4. Final check and store data
-            if (metaResult.imdbId && metaResult.tmdbId) {
-                await dataManager.findOrCreateShow(metaResult.tmdbId, metaResult.imdbId, baseTitle, year);
-                await dataManager.updateCatalog(metaResult.imdbId, metaResult.name, metaResult.poster, metaResult.year);
-                await dataManager.addStream(metaResult.tmdbId, parsedStream);
-            } else {
-                await dataManager.logUnmatchedMagnet(magnetUri, parsedStream.name, threadUrl);
+        // 4. Final check: If we have IDs, process. Otherwise, log orphans.
+        if (metaResult.imdbId && metaResult.tmdbId) {
+            // Create mappings in DB
+            await dataManager.findOrCreateShow(metaResult.tmdbId, metaResult.imdbId, baseTitle, year);
+            await dataManager.updateCatalog(metaResult.imdbId, metaResult.name, metaResult.poster, metaResult.year);
+            
+            // Now, loop through the magnets and add them using their own parsed info
+            for (const magnetUri of threadData.magnets) {
+                const parsedStream = parseTitle(magnetUri);
+                if (parsedStream) {
+                    await dataManager.addStream(metaResult.tmdbId, parsedStream);
+                }
+            }
+        } else {
+            // If the entire thread couldn't be matched, log all its magnets as orphans
+            logger.warn({ title: baseTitle }, "Could not resolve show. Logging magnets as orphans.");
+            for (const magnetUri of threadData.magnets) {
+                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl);
             }
         }
         
@@ -116,7 +118,7 @@ async function processThread(threadUrl) {
     }
 }
 
-// --- Worker main loop ---
+// --- Worker main loop is unchanged ---
 if (!parentPort) {
     process.exit();
 }
