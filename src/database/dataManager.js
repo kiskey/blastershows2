@@ -4,6 +4,7 @@ const redis = require('./redis');
 const logger = require('../utils/logger');
 const { getTrackers } = require('../utils/trackers');
 const config = require('../utils/config');
+const { parseTitle, normalizeBaseTitle } = require('../parser/titleParser'); // We need this for the rescue op
 
 // SCHEMA:
 // imdb_map:{imdbId} -> tmdbId
@@ -212,6 +213,70 @@ async function getThreadsToRevisit() {
     return threadsToRevisit;
 }
 
+
+// --- START OF THE NEW RESCUE FUNCTION ---
+/**
+ * Scans the orphan list and tries to match them against already known shows.
+ */
+async function rescueOrphanedMagnets() {
+    logger.info('Starting orphan rescue background job...');
+    const orphanKey = 'unmatched_magnets';
+    const allOrphans = await redis.lrange(orphanKey, 0, -1);
+
+    if (allOrphans.length === 0) {
+        logger.info('No orphans to rescue.');
+        return;
+    }
+
+    // 1. Get all known show mappings
+    const showMapKeys = await redis.keys('show_map:*');
+    const knownTitles = new Map();
+    if (showMapKeys.length > 0) {
+        const pipeline = redis.pipeline();
+        showMapKeys.forEach(key => pipeline.get(key));
+        const tmdbIds = await pipeline.exec();
+
+        showMapKeys.forEach((key, index) => {
+            // Key is like "show_map:suits-la:2025" or "show_map:squid-game"
+            const title = key.split(':').slice(1, -1).join(':') || key.split(':').slice(1).join(':');
+            const tmdbId = tmdbIds[index][1];
+            if (title && tmdbId) {
+                knownTitles.set(title, tmdbId);
+            }
+        });
+    }
+    
+    if (knownTitles.size === 0) {
+        logger.info('No known shows in cache to match against.');
+        return;
+    }
+
+    let rescuedCount = 0;
+    for (const orphanString of allOrphans) {
+        const orphan = JSON.parse(orphanString);
+        const parsedStream = parseTitle(orphan.magnet);
+        if (!parsedStream) continue;
+
+        const baseTitle = normalizeBaseTitle(parsedStream.name);
+
+        // 2. Check if the orphan's base title matches a known show
+        if (knownTitles.has(baseTitle)) {
+            const tmdbId = knownTitles.get(baseTitle);
+            logger.info({ title: baseTitle, tmdbId }, 'Rescuing orphan! Found a match in cache.');
+            
+            // 3. Add the stream to the correct show
+            await addStream(tmdbId, parsedStream);
+            
+            // 4. Remove it from the orphan list
+            await redis.lrem(orphanKey, 0, orphanString);
+            rescuedCount++;
+        }
+    }
+
+    logger.info({ rescued: rescuedCount, remaining: allOrphans.length - rescuedCount }, 'Orphan rescue job finished.');
+}
+// --- END OF THE NEW RESCUE FUNCTION ---
+
 module.exports = {
     findOrCreateShow,
     addStream,
@@ -223,4 +288,5 @@ module.exports = {
     getCustomCatalog,
     logUnmatchedMagnet,
     findCachedTmdbId,
+    rescueOrphanedMagnets // Export the new function
 };
