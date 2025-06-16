@@ -298,7 +298,7 @@ async function getThreadsToRevisit() {
 
 // --- rescueOrphanedMagnets now uses the normalizedTitle from the orphan object ---
 async function rescueOrphanedMagnets() {
-    logger.info('Starting advanced orphan rescue job...');
+    logger.info('Starting ultimate orphan rescue job...');
     const orphanKey = 'unmatched_magnets';
     const allOrphans = await redis.lrange(orphanKey, 0, -1);
 
@@ -307,21 +307,31 @@ async function rescueOrphanedMagnets() {
         return;
     }
 
-    const showMapKeys = await redis.keys('show_map:*');
+    // --- START OF THE ULTIMATE FIX ---
+    // 1. Get all known show mappings from the cache AND the manual hints.
     const knownTitles = new Map();
+    
+    // Load from manual hints first (highest priority)
+    const hints = await redis.hgetall('search_hints');
+    for (const title in hints) {
+        knownTitles.set(title, hints[title]); // Value is "tmdb:123" or "tt123"
+    }
+    
+    // Load from automatic cache (will not overwrite manual hints)
+    const showMapKeys = await redis.keys('show_map:*');
     if (showMapKeys.length > 0) {
         const tmdbIds = await redis.mget(showMapKeys);
         showMapKeys.forEach((key, index) => {
             const title = key.split(':').slice(1, -1).join(':') || key.split(':').slice(1).join(':');
-            const tmdbId = tmdbIds[index];
-            if (title && tmdbId) {
-                knownTitles.set(title, tmdbId);
+            if (title && !knownTitles.has(title)) { // Don't overwrite a manual hint
+                knownTitles.set(title, `tmdb:${tmdbIds[index]}`);
             }
         });
     }
+    // --- END OF THE ULTIMATE FIX ---
     
     if (knownTitles.size === 0) {
-        logger.warn('Orphan rescue job: No known shows in cache to match against.');
+        logger.warn('Orphan rescue job: No known shows in cache or hints to match against.');
         return;
     }
 
@@ -332,13 +342,16 @@ async function rescueOrphanedMagnets() {
         let orphan = JSON.parse(orphanString);
         let rescued = false;
         
-        // Use the stored normalizedTitle for matching
         const baseTitle = orphan.normalizedTitle; 
 
         if (baseTitle && knownTitles.has(baseTitle)) {
-            const tmdbId = knownTitles.get(baseTitle);
+            const id = knownTitles.get(baseTitle); // This will be "tmdb:123" or "tt123"
+            const [source, externalId] = id.split(':');
+            
+            let tmdbId = source === 'tmdb' ? externalId : await getTmdbIdByImdbId(id);
+
             if (tmdbId) {
-                logger.info({ title: baseTitle, tmdbId }, 'Rescuing orphan! Found a match in cache.');
+                logger.info({ title: baseTitle, tmdbId }, 'Rescuing orphan! Found a match.');
                 const minimalMagnet = `magnet:?xt=urn:btih:${orphan.infoHash}&dn=${encodeURIComponent(orphan.displayName)}`;
                 const parsedStream = parseTitle(minimalMagnet);
                 if (parsedStream) {
@@ -358,14 +371,13 @@ async function rescueOrphanedMagnets() {
     if (allOrphans.length > 0) {
         const pipeline = redis.pipeline();
         pipeline.del(orphanKey);
-        if (updatedOrphans.length > 0) {
-            pipeline.rpush(orphanKey, updatedOrphans);
-        }
+        if (updatedOrphans.length > 0) pipeline.rpush(orphanKey, updatedOrphans);
         await pipeline.exec();
     }
     
     logger.info({ rescued: rescuedCount, remaining: updatedOrphans.length }, 'Orphan rescue job finished.');
 }
+
 
 
 module.exports = {
