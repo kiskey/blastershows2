@@ -26,34 +26,31 @@ async function fetchThreadHtml(url) {
 }
 
 async function processThread(threadUrl) {
+    let metaResult = null;
+    let baseTitle = null;
+    let threadData = null;
+
     try {
         const html = await fetchThreadHtml(threadUrl);
         if (!html) return;
 
-        const threadData = parseThreadPage(html, threadUrl);
+        threadData = parseThreadPage(html, threadUrl);
         if (!threadData || threadData.magnets.length === 0) {
             await dataManager.updateThreadTimestamp(threadUrl);
             return;
         }
 
-        // --- THE CORRECT LOGIC RESTORED ---
-        // 1. Get the base title and year ONCE from the clean THREAD TITLE.
-        const baseTitle = normalizeBaseTitle(threadData.title);
+        baseTitle = normalizeBaseTitle(threadData.title);
         const yearMatch = threadData.title.match(/\b(19|20)\d{2}\b/);
         const year = yearMatch ? yearMatch[0] : null;
 
         if (!baseTitle) {
             logger.warn({ threadTitle: threadData.title }, 'Could not normalize a base title from thread.');
-            // This thread is unmatchable, log all its magnets as orphans
-            for (const magnetUri of threadData.magnets) {
-                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl);
-            }
-            return;
+            throw new Error('Title normalization failed');
         }
 
-        let metaResult = { tmdbId: null, imdbId: null, poster: null, name: baseTitle, year: year };
+        metaResult = { tmdbId: null, imdbId: null, poster: null, name: baseTitle, year: year };
 
-        // 2. Check our cache for this title to avoid API calls
         const cachedTmdbId = await dataManager.findCachedTmdbId(baseTitle, year);
         if (cachedTmdbId) {
             metaResult.tmdbId = cachedTmdbId;
@@ -65,7 +62,6 @@ async function processThread(threadUrl) {
                 metaResult.year = details.first_air_date ? details.first_air_date.substring(0, 4) : year;
             }
         } else {
-            // 3. If not cached, perform the full API waterfall
             const tmdbSearch = await searchTv(baseTitle, year);
             if (tmdbSearch && tmdbSearch.id) {
                 const details = await getTvDetails(tmdbSearch.id);
@@ -86,29 +82,38 @@ async function processThread(threadUrl) {
                 }
             }
         }
+        
+        if (!metaResult.imdbId || !metaResult.tmdbId) {
+            // This will be caught by the catch block below
+            throw new Error('METADATA_LOOKUP_FAILED');
+        }
 
-        // 4. Final check and store data
-        if (metaResult.imdbId && metaResult.tmdbId) {
-            await dataManager.findOrCreateShow(metaResult.tmdbId, metaResult.imdbId, baseTitle, year);
-            await dataManager.updateCatalog(metaResult.imdbId, metaResult.name, metaResult.poster, metaResult.year);
-            // NOW, loop through the magnets and add them to the TMDb ID we just found.
-            for (const magnetUri of threadData.magnets) {
-                const parsedStream = parseTitle(magnetUri);
-                if (parsedStream) {
-                    await dataManager.addStream(metaResult.tmdbId, parsedStream);
-                }
-            }
-        } else {
-            logger.warn({ title: baseTitle }, "Could not resolve show via APIs. Logging magnets as orphans.");
-            for (const magnetUri of threadData.magnets) {
-                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl);
+        // --- Success Path ---
+        await dataManager.findOrCreateShow(metaResult.tmdbId, metaResult.imdbId, baseTitle, year);
+        await dataManager.updateCatalog(metaResult.imdbId, metaResult.name, metaResult.poster, metaResult.year);
+        for (const magnetUri of threadData.magnets) {
+            const parsedStream = parseTitle(magnetUri);
+            if (parsedStream) {
+                await dataManager.addStream(metaResult.tmdbId, parsedStream);
             }
         }
         
         await dataManager.updateThreadTimestamp(threadUrl);
 
     } catch (error) {
-        logger.error({ err: error.message, url: threadUrl }, 'Error processing thread');
+        // --- START OF NEW ERROR HANDLING & ORPHAN LOGGING ---
+        const reason = error.message.includes('timeout') ? 'API_TIMEOUT' :
+                       error.message.includes('METADATA_LOOKUP_FAILED') ? 'NO_METADATA_MATCH' :
+                       'UNKNOWN_ERROR';
+        
+        logger.warn({ title: baseTitle || threadData?.title, reason }, "Could not resolve show. Logging magnets as orphans.");
+        
+        if (threadData && threadData.magnets) {
+            for (const magnetUri of threadData.magnets) {
+                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl, reason);
+            }
+        }
+        // --- END OF NEW ERROR HANDLING & ORPHAN LOGGING ---
     }
 }
 
