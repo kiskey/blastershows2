@@ -10,6 +10,7 @@ const { searchOmdb } = require('../utils/omdb');
 const config = require('../utils/config');
 const logger = require('../utils/logger');
 
+
 async function fetchThreadHtml(url) {
     try {
         const { data } = await axios.get(url, {
@@ -44,7 +45,6 @@ async function processThread(threadUrl) {
         const year = yearMatch ? yearMatch[0] : null;
 
         if (!baseTitle) {
-            logger.warn({ threadTitle: threadData.title }, 'Title became empty after normalization, skipping.');
             throw new Error('BAD_TITLE');
         }
 
@@ -71,19 +71,20 @@ async function processThread(threadUrl) {
             }
         }
 
-        if (metaResult.imdbId && metaResult.tmdbId) {
-            await dataManager.findOrCreateShow(metaResult.tmdbId, metaResult.imdbId, baseTitle, year);
-            await dataManager.updateCatalog(metaResult.imdbId, metaResult.name, metaResult.poster_path ? `https://image.tmdb.org/t/p/w500${metaResult.poster_path}` : null, metaResult.year);
-            for (const magnetUri of threadData.magnets) {
-                const parsedStream = parseTitle(magnetUri);
-                if (parsedStream) {
-                    await dataManager.addStream(metaResult.tmdbId, parsedStream);
-                } else {
-                    await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl, "MAGNET_PARSE_FAILED");
-                }
-            }
-        } else {
+        if (!metaResult.imdbId || !metaResult.tmdbId) {
             throw new Error('METADATA_MATCH_FAILED');
+        }
+
+        // --- Success Path ---
+        await dataManager.findOrCreateShow(metaResult.tmdbId, metaResult.imdbId, baseTitle, year);
+        await dataManager.updateCatalog(metaResult.imdbId, metaResult.name, metaResult.poster_path ? `https://image.tmdb.org/t/p/w500${metaResult.poster_path}` : null, metaResult.year);
+        for (const magnetUri of threadData.magnets) {
+            const parsedStream = parseTitle(magnetUri);
+            if (parsedStream) {
+                await dataManager.addStream(metaResult.tmdbId, parsedStream);
+            } else {
+                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl, "MAGNET_PARSE_FAILED", baseTitle);
+            }
         }
         
         await dataManager.updateThreadTimestamp(threadUrl);
@@ -98,13 +99,14 @@ async function processThread(threadUrl) {
         
         if (threadData && threadData.magnets && threadData.magnets.length > 0) {
             for (const magnetUri of threadData.magnets) {
-                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl, reason);
+                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl, reason, baseTitle);
             }
         } else if (threadData) {
-            await dataManager.logUnmatchedMagnet('N/A', threadData.title, threadUrl, reason);
+            await dataManager.logUnmatchedMagnet('N/A', threadData.title, threadUrl, reason, baseTitle);
         }
     }
 }
+
 
 if (!parentPort) {
     process.exit();
