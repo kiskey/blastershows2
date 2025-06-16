@@ -5,13 +5,22 @@ const logger = require('../utils/logger');
 const { getTrackers } = require('../utils/trackers');
 const config = require('../utils/config');
 
-async function findOrCreateShow(tmdbId, imdbId) {
-    const mappingKey = `imdb_map:${imdbId}`;
-    const existingTmdbId = await redis.get(mappingKey);
-    if (!existingTmdbId || existingTmdbId !== tmdbId.toString()) {
-        await redis.set(mappingKey, tmdbId);
-        logger.info({ imdbId, tmdbId }, 'Created/refreshed IMDb to TMDb mapping.');
-    }
+// SCHEMA:
+// imdb_map:{imdbId} -> tmdbId
+// show_map:{baseTitle}:{year} -> tmdbId (CACHE)
+// stream:tmdb:{tmdbId} -> HASH
+// catalog:series -> Sorted Set
+
+async function findOrCreateShow(tmdbId, imdbId, baseTitle, year) {
+    const imdbMappingKey = `imdb_map:${imdbId}`;
+    const titleMappingKey = year ? `show_map:${baseTitle}:${year}` : `show_map:${baseTitle}`;
+
+    const pipeline = redis.pipeline();
+    pipeline.set(imdbMappingKey, tmdbId);
+    pipeline.set(titleMappingKey, tmdbId, 'EX', 60 * 60 * 24 * 30); // Cache title mapping for 30 days
+    await pipeline.exec();
+
+    logger.debug({ imdbId, tmdbId, title: baseTitle }, 'Created/refreshed ID mappings.');
 }
 
 async function addStream(tmdbId, streamInfo) {
@@ -49,28 +58,17 @@ async function getStreamsByTmdbId(tmdbId, requestedSeason, requestedEpisode) {
     let filteredStreams = [];
 
     if (requestedSeason && requestedEpisode) {
-        // Layer 1: Exact matches
-        const exactMatches = allStreams.filter(stream => 
-            !stream.isEpisodePack && !stream.isSeasonPack && 
-            stream.season === requestedSeason && stream.episodes.includes(requestedEpisode)
-        );
+        const exactMatches = allStreams.filter(stream => !stream.isEpisodePack && !stream.isSeasonPack && stream.season === requestedSeason && stream.episodes.includes(requestedEpisode));
         if (exactMatches.length > 0) {
             filteredStreams = exactMatches;
-        }
-        // Layer 2: Episode pack matches
-        if (filteredStreams.length === 0) {
-            const episodePackMatches = allStreams.filter(stream => 
-                stream.isEpisodePack && stream.season === requestedSeason &&
-                requestedEpisode >= stream.episodes[0] && requestedEpisode <= stream.episodes[stream.episodes.length - 1]
-            );
-            if (episodePackMatches.length > 0) filteredStreams = episodePackMatches;
-        }
-        // Layer 3: Season pack fallback
-        if (filteredStreams.length === 0) {
-            const seasonPackMatches = allStreams.filter(stream => 
-                stream.isSeasonPack && stream.season === requestedSeason
-            );
-            if (seasonPackMatches.length > 0) filteredStreams = seasonPackMatches;
+        } else {
+            const episodePackMatches = allStreams.filter(stream => stream.isEpisodePack && stream.season === requestedSeason && requestedEpisode >= stream.episodes[0] && requestedEpisode <= stream.episodes[stream.episodes.length - 1]);
+            if (episodePackMatches.length > 0) {
+                filteredStreams = episodePackMatches;
+            } else {
+                const seasonPackMatches = allStreams.filter(stream => stream.isSeasonPack && stream.season === requestedSeason);
+                if (seasonPackMatches.length > 0) filteredStreams = seasonPackMatches;
+            }
         }
     } else {
         filteredStreams = allStreams;
@@ -94,15 +92,43 @@ async function getStreamsByTmdbId(tmdbId, requestedSeason, requestedEpisode) {
             const episodeNum = String(parsed.episodes[0]).padStart(2, '0');
             streamDescription = `📺 S${seasonNum}E${episodeNum}\n💾 ${parsed.size || 'N/A'}\n🗣️ ${langString}`;
         }
+        
         let videoSizeBytes = 0;
-        if (parsed.size) { /* ... */ }
+        if (parsed.size) {
+            const sizeMatch = parsed.size.match(/(\d+(\.\d+)?)\s*(GB|MB)/i);
+            if (sizeMatch) {
+                const sizeValue = parseFloat(sizeMatch[1]);
+                const sizeUnit = sizeMatch[3].toUpperCase();
+                videoSizeBytes = sizeUnit === 'GB' ? sizeValue * 1e9 : sizeValue * 1e6;
+            }
+        }
+        
         return {
-            name: streamName, description: streamDescription, infoHash: parsed.infoHash,
-            sources: bestTrackers, behaviorHints: { bingeGroup: `tamilblasters-${parsed.resolution}`, videoSize: videoSizeBytes > 0 ? videoSizeBytes : undefined }
+            name: streamName, 
+            description: streamDescription, 
+            infoHash: parsed.infoHash,
+            sources: bestTrackers, 
+            behaviorHints: { 
+                bingeGroup: `tamilblasters-${parsed.resolution}`, 
+                videoSize: videoSizeBytes > 0 ? videoSizeBytes : undefined 
+            }
         };
     });
 
-    streams.sort((a, b) => { /* ... sorting logic ... */ });
+    streams.sort((a, b) => {
+        const seasonA = parseInt(a.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
+        const seasonB = parseInt(b.description.match(/S(\d+)|Season (\d+)/)?.[1] || 0);
+        if (seasonB !== seasonA) return seasonB - seasonA;
+
+        const episodeA = parseInt(a.description.match(/E(\d+)/)?.[1] || 0);
+        const episodeB = parseInt(b.description.match(/E(\d+)/)?.[1] || 0);
+        if (episodeB !== episodeA) return episodeB - episodeA;
+
+        const resA = parseInt(a.name.match(/\d{3,4}/)?.[0] || 0);
+        const resB = parseInt(b.name.match(/\d{3,4}/)?.[0] || 0);
+        return resB - resA;
+    });
+
     return streams;
 }
 
@@ -111,13 +137,6 @@ async function getTmdbIdByImdbId(imdbId) {
     return redis.get(mappingKey);
 }
 
-// --- START OF NEW FUNCTION ---
-/**
- * Tries to find a cached TMDb ID from a title and year to avoid API calls.
- * @param {string} baseTitle
- * @param {string|null} year
- * @returns {Promise<string|null>} The cached TMDb ID or null.
- */
 async function findCachedTmdbId(baseTitle, year) {
     let mappingKey;
     if (year) {
@@ -128,7 +147,6 @@ async function findCachedTmdbId(baseTitle, year) {
             return tmdbId;
         }
     }
-    // Fallback to check without year
     mappingKey = `show_map:${baseTitle}`;
     const tmdbId = await redis.get(mappingKey);
     if (tmdbId) {
@@ -136,12 +154,16 @@ async function findCachedTmdbId(baseTitle, year) {
     }
     return tmdbId;
 }
-// --- END OF NEW FUNCTION ---
 
 async function updateCatalog(imdbId, name, poster, year) {
     const catalogKey = 'catalog:series';
     const score = year ? parseInt(year, 10) : 0;
-    const meta = { id: imdbId, type: 'series', name: name, poster: poster };
+    const meta = {
+        id: imdbId,
+        type: 'series',
+        name: name,
+        poster: poster,
+    };
     await redis.zadd(catalogKey, score, JSON.stringify(meta));
     logger.debug({ imdbId, name }, 'Updated custom catalog.');
 }
@@ -173,11 +195,14 @@ async function updateThreadTimestamp(threadUrl) {
 async function getThreadsToRevisit() {
     const keys = await redis.keys('thread:*');
     if (!keys.length) return [];
+
     const pipeline = redis.pipeline();
     keys.forEach(key => pipeline.hget(key, 'lastVisited'));
     const results = await pipeline.exec();
+    
     const revisitThreshold = new Date();
     revisitThreshold.setHours(revisitThreshold.getHours() - config.THREAD_REVISIT_HOURS);
+    
     const threadsToRevisit = [];
     results.forEach(([, lastVisited], index) => {
         if (lastVisited && new Date(lastVisited) < revisitThreshold) {
@@ -197,5 +222,5 @@ module.exports = {
     updateCatalog,
     getCustomCatalog,
     logUnmatchedMagnet,
-    findCachedTmdbId, // Export the new function
+    findCachedTmdbId,
 };
