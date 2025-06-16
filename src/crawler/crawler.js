@@ -26,16 +26,25 @@ async function getValidUrl(url) {
     }
 }
 
-async function fetchPage(url) {
-    try {
-        const { data } = await axios.get(url, { headers: { 'User-Agent': config.USER_AGENT } });
-        return data;
-    } catch (error) {
-        if (error.response && error.response.status === 404) {
-            return null;
+// --- fetchPage now has retry logic ---
+async function fetchPage(url, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const { data } = await axios.get(url, { headers: { 'User-Agent': config.USER_AGENT }, timeout: 15000 });
+            return data;
+        } catch (error) {
+            // Don't retry on 404, it's a definitive "not found"
+            if (error.response && error.response.status === 404) {
+                return null;
+            }
+            logger.warn({ url, attempt: i + 1, err: error.message }, `Failed to fetch page. Retrying in 5s...`);
+            if (i < retries - 1) {
+                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before the next retry
+            } else {
+                logger.error({ url }, `Failed to fetch page after ${retries} attempts.`);
+                throw error; // Throw the final error if all retries fail
+            }
         }
-        logger.error({ url, err: error.message }, 'Failed to fetch page');
-        throw error;
     }
 }
 
@@ -62,7 +71,7 @@ async function runCrawler(isInitial = false) {
         logger.info(`Crawling page: ${pageUrl}`);
         
         try {
-            const html = await fetchPage(pageUrl);
+            const html = await fetchPage(pageUrl); // Now uses the new retry logic
             if (!html) {
                 logger.info('Reached the end of pagination.');
                 break;
@@ -72,19 +81,17 @@ async function runCrawler(isInitial = false) {
             totalThreadsFound += threadUrls.length;
             logger.info(`Found ${threadUrls.length} threads on page ${i}. Adding to queue...`);
 
-            // Add all tasks to the pool. The pool will manage starting them.
             threadUrls.forEach(url => workerPool.run({ url }));
 
             await new Promise(resolve => setTimeout(resolve, 500)); 
 
         } catch (error) {
-            logger.error({ page: i, err: error.message }, 'Failed to process a page. Moving to the next one.');
+            logger.error({ page: i, err: error.message }, 'Failed to process a page after all retries. Moving to the next one.');
             continue;
         }
     }
     
     logger.info(`Crawler page discovery finished. Total threads queued: ${totalThreadsFound}. Waiting for all workers to complete...`);
-    // Use the simpler wait() method.
     await workerPool.wait();
     logger.info('All worker tasks have been completed. Crawler run is fully finished.');
 }
@@ -122,9 +129,7 @@ function scheduleCrawls() {
         }
     }, config.CRAWL_INTERVAL * 1000);
 
-    // ---- THIS IS THE FIX ----
     setInterval(async () => {
-    // ---- END OF FIX ----
         if (isRevisitingOld) {
             logger.warn('Old thread revisit is already in progress. Skipping this interval.');
             return;
