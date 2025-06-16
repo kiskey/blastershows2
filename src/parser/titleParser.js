@@ -93,29 +93,31 @@ function getLanguages(title, pttLangs = []) {
     return languages.size > 0 ? Array.from(languages) : ['en'];
 }
 
-// --- THIS IS THE CORRECT, FINAL NORMALIZER FUNCTION ---
+// --- THE DEFINITIVE, FINAL, CORRECT NORMALIZER ---
 function normalizeBaseTitle(title) {
     if (!title) return '';
     
-    // First, remove years and any bracketed content.
-    let cleanTitle = title
-        .replace(/\b((19|20)\d{2})\b/g, '')
-        .replace(/\[[^\]]+\]/g, '');
+    // 1. Use the library as the first pass to get the most likely title candidate.
+    const ptt = parse(title);
+    let cleanTitle = ptt.title || title;
 
-    // Now, use the library on this pre-cleaned title to get the core name.
-    // This is good at stripping S01, E01, etc.
-    const ptt = parse(cleanTitle);
+    // 2. Remove the year, which is often attached to the title.
+    cleanTitle = cleanTitle.replace(/\b((19|20)\d{2})\b/g, '');
     
-    // Prioritize the library's parsed title if it's substantial.
-    cleanTitle = ptt.title && ptt.title.length > 2 ? ptt.title : cleanTitle;
-
-    // Final cleanup: remove known junk words, normalize spacing, but keep important punctuation.
+    // 3. Remove common junk keywords and file extensions.
+    // The \b ensures we only match whole words.
+    const junkWords = /\b(tamil|hindi|telugu|english|uncut|complete|s\d+|season|ep|episode|web-dl|hdrip|hd|avc|x264|aac|ddp5 1|mkv|mp4)\b/gi;
+    cleanTitle = cleanTitle.replace(junkWords, '');
+    
+    // 4. Remove any content inside brackets or parentheses.
+    cleanTitle = cleanTitle.replace(/\[[^\]]+\]/g, '');
+    cleanTitle = cleanTitle.replace(/\([^)]+\)/g, '');
+    
+    // 5. Clean up remaining special characters and extra spaces.
     cleanTitle = cleanTitle
-        .replace(/\b(tamil|hindi|telugu|english|uncut|complete|hq|hd|hdrip|avc|ddp5 1|web-dl|x264|aac)\b/gi, '')
-        .replace(/[-_]/g, ' ') // Replace hyphens and underscores with spaces
-        .replace(/[()]/g, '') // Remove parentheses
-        .trim()
-        .replace(/\s+/g, ' '); // Collapse multiple spaces into one
+        .replace(/[._-]/g, ' ') // replace separators with spaces
+        .replace(/\s+/g, ' ')  // collapse multiple spaces
+        .trim();
 
     return cleanTitle.toLowerCase();
 }
