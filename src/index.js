@@ -5,9 +5,9 @@ const { startServer } = require('./addon');
 const config = require('./utils/config');
 const logger = require('./utils/logger');
 const redisClient = require('./database/redis');
-const dataManager = require('./database/dataManager'); // Import dataManager
+const dataManager = require('./database/dataManager');
 require('./utils/trackers');
-require('./utils/apiClient');
+require('./utils/apiClient'); // Ensure apiClient is initialized
 
 async function main() {
     logger.info(`Main process ${process.pid} is starting...`);
@@ -24,21 +24,29 @@ async function main() {
 
     startServer();
 
-    logger.info(`Starting initial crawl for ${config.INITIAL_PAGES} pages in the background...`);
-    runCrawler(true).catch(err => {
-        logger.error({ err }, "Initial crawler run failed.");
-    });
+    // Run the initial crawl and then the rescue job immediately after.
+    (async () => {
+        try {
+            logger.info(`Starting initial crawl for ${config.INITIAL_PAGES} pages...`);
+            await runCrawler(true); // Wait for the initial crawl to finish
+            
+            logger.info('Initial crawl complete. Running immediate orphan rescue job...');
+            await dataManager.rescueOrphanedMagnets();
+            logger.info('Immediate orphan rescue job finished.');
+        } catch(err) {
+            logger.error({ err }, "Initial startup sequence (crawl/rescue) failed.");
+        }
+    })();
 
-    scheduleCrawls();
-
-    // --- START OF NEW SCHEDULER ---
-    // Schedule the orphan rescue job to run periodically (e.g., every 6 hours)
+    // Schedule subsequent background tasks
+    scheduleCrawls(); // This schedules the recurring page crawl
+    
+    // This schedules the recurring orphan rescue
     setInterval(() => {
         dataManager.rescueOrphanedMagnets().catch(err => {
-            logger.error({ err }, 'Orphan rescue job failed.');
+            logger.error({ err }, 'Scheduled orphan rescue job failed.');
         });
-    }, 6 * 60 * 60 * 1000); // 6 hours
-    // --- END OF NEW SCHEDULER ---
+    }, 6 * 60 * 60 * 1000); // Every 6 hours
 }
 
 main().catch(err => {
