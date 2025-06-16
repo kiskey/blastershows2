@@ -112,6 +112,11 @@ function normalizeBaseTitle(title) {
     // 4. Remove any content inside brackets or parentheses.
     cleanTitle = cleanTitle.replace(/\[[^\]]+\]/g, '');
     cleanTitle = cleanTitle.replace(/\([^)]+\)/g, '');
+
+     // --- START OF THE FIX ---
+    // This new line will specifically remove leftover season/episode junk like "s01ep"
+    cleanTitle = cleanTitle.replace(/\b(s\d{1,2}ep|s\d{1,2}e|s\d{1,2})\b/gi, '');
+    // --- END OF THE FIX ---
     
     // 5. Clean up remaining special characters and extra spaces.
     cleanTitle = cleanTitle
