@@ -26,27 +26,26 @@ async function fetchThreadHtml(url) {
 }
 
 async function processThread(threadUrl) {
+    let baseTitle = null;
+    let threadData = { title: 'Unknown', magnets: [] };
+
     try {
         const html = await fetchThreadHtml(threadUrl);
         if (!html) return;
 
-        const threadData = parseThreadPage(html, threadUrl);
+        threadData = parseThreadPage(html, threadUrl);
         if (!threadData || !threadData.title || threadData.magnets.length === 0) {
             await dataManager.updateThreadTimestamp(threadUrl);
             return;
         }
 
-        // --- THE CORRECT LOGIC RESTORED ---
-        const baseTitle = normalizeBaseTitle(threadData.title);
+        baseTitle = normalizeBaseTitle(threadData.title);
         const yearMatch = threadData.title.match(/\b(19|20)\d{2}\b/);
         const year = yearMatch ? yearMatch[0] : null;
 
         if (!baseTitle) {
             logger.warn({ threadTitle: threadData.title }, 'Title became empty after normalization, skipping.');
-            for (const magnetUri of threadData.magnets) {
-                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl, "BAD_TITLE");
-            }
-            return;
+            throw new Error('BAD_TITLE');
         }
 
         logger.info({ threadTitle: threadData.title, baseTitle: baseTitle, year: year }, 'Processing thread with normalized title');
@@ -61,13 +60,13 @@ async function processThread(threadUrl) {
             const tmdbSearch = await searchTv(baseTitle, year);
             if (tmdbSearch && tmdbSearch.id) {
                 const details = await getTvDetails(tmdbSearch.id);
-                if (details && details.imdbId) metaResult = details;
+                if (details && details.imdbId) metaResult = { ...details };
             }
             if (!metaResult.imdbId) {
                 const omdbSearch = await searchOmdb(baseTitle);
                 if (omdbSearch && omdbSearch.imdbId) {
                     const details = await getTvDetails(omdbSearch.imdbId);
-                    if (details && details.tmdbId) metaResult = details;
+                    if (details && details.tmdbId) metaResult = { ...details };
                 }
             }
         }
@@ -77,24 +76,36 @@ async function processThread(threadUrl) {
             await dataManager.updateCatalog(metaResult.imdbId, metaResult.name, metaResult.poster_path ? `https://image.tmdb.org/t/p/w500${metaResult.poster_path}` : null, metaResult.year);
             for (const magnetUri of threadData.magnets) {
                 const parsedStream = parseTitle(magnetUri);
-                if (parsedStream) await dataManager.addStream(metaResult.tmdbId, parsedStream);
-                else await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl, "MAGNET_PARSE_FAILED");
+                if (parsedStream) {
+                    await dataManager.addStream(metaResult.tmdbId, parsedStream);
+                } else {
+                    await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl, "MAGNET_PARSE_FAILED");
+                }
             }
         } else {
-            logger.warn({ title: baseTitle }, "Could not resolve via APIs. Logging as orphans.");
-            for (const magnetUri of threadData.magnets) {
-                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl, "METADATA_MATCH_FAILED");
-            }
+            throw new Error('METADATA_MATCH_FAILED');
         }
         
         await dataManager.updateThreadTimestamp(threadUrl);
 
     } catch (error) {
-        logger.error({ err: error.message, url: threadUrl }, 'Unhandled error in processThread');
+        const reason = error.message.includes('timeout') ? 'API_TIMEOUT' :
+                       error.message === 'METADATA_MATCH_FAILED' ? 'NO_METADATA_MATCH' :
+                       error.message === 'BAD_TITLE' ? 'BAD_TITLE' :
+                       'UNKNOWN_ERROR';
+        
+        logger.warn({ title: baseTitle || threadData?.title, reason }, "Could not resolve show. Logging magnets as orphans.");
+        
+        if (threadData && threadData.magnets && threadData.magnets.length > 0) {
+            for (const magnetUri of threadData.magnets) {
+                await dataManager.logUnmatchedMagnet(magnetUri, threadData.title, threadUrl, reason);
+            }
+        } else if (threadData) {
+            await dataManager.logUnmatchedMagnet('N/A', threadData.title, threadUrl, reason);
+        }
     }
 }
 
-// --- Worker main loop ---
 if (!parentPort) {
     process.exit();
 }
