@@ -176,18 +176,18 @@ async function getCustomCatalog() {
     return results.map(item => JSON.parse(item));
 }
 
-// --- START OF NEW logUnmatchedMagnet function ---
+// --- `logUnmatchedMagnet` now accepts and stores the normalizedTitle ---
 /**
- * Logs a magnet that could not be matched, storing only essential info.
+ * Logs a magnet that could not be matched, storing essential diagnostic info.
  * @param {string} magnetUri - The full magnet URI.
- * @param {string} threadTitle - The title of the forum thread.
+ * @param {string} threadTitle - The original title of the forum thread.
  * @param {string} sourceUrl - The URL of the forum thread.
  * @param {string} reason - The reason for the failure.
+ * @param {string} normalizedTitle - The cleaned title that was used for the API search.
  */
-async function logUnmatchedMagnet(magnetUri, threadTitle, sourceUrl, reason) {
+async function logUnmatchedMagnet(magnetUri, threadTitle, sourceUrl, reason, normalizedTitle) {
     const orphanKey = 'unmatched_magnets';
     
-    // Parse the magnet URI to extract clean info
     const infoHashMatch = magnetUri.match(/btih:([a-fA-F0-9]{40})/i);
     const dnMatch = magnetUri.match(/dn=([^&]+)/i);
 
@@ -198,16 +198,17 @@ async function logUnmatchedMagnet(magnetUri, threadTitle, sourceUrl, reason) {
         infoHash,
         displayName,
         threadTitle,
+        normalizedTitle, // Add the normalized title to the log
         sourceUrl,
         reason,
-        attempts: 1, // Always starts at 1
+        attempts: 1,
         loggedAt: new Date().toISOString()
     };
     
     await redis.lpush(orphanKey, JSON.stringify(data));
     logger.debug({ title: threadTitle, reason }, 'Logged a clean orphan magnet.');
 }
-// --- END OF NEW logUnmatchedMagnet function ---
+// --- END OF CHANGE ---
 
 async function updateThreadTimestamp(threadUrl) {
     const threadKey = `thread:${Buffer.from(threadUrl).toString('base64')}`;
@@ -235,7 +236,7 @@ async function getThreadsToRevisit() {
 }
 
 
-// --- rescueOrphanedMagnets now handles the new orphan structure ---
+// --- rescueOrphanedMagnets now uses the normalizedTitle from the orphan object ---
 async function rescueOrphanedMagnets() {
     logger.info('Starting advanced orphan rescue job...');
     const orphanKey = 'unmatched_magnets';
@@ -271,25 +272,20 @@ async function rescueOrphanedMagnets() {
         let orphan = JSON.parse(orphanString);
         let rescued = false;
         
-        // Reconstruct a minimal magnet URI for parsing
-        const minimalMagnet = `magnet:?xt=urn:btih:${orphan.infoHash}&dn=${encodeURIComponent(orphan.displayName)}`;
-        const parsedStream = parseTitle(minimalMagnet);
-        if (!parsedStream) {
-            orphan.attempts = (orphan.attempts || 1) + 1;
-            orphan.reason = "RESCUE_PARSE_FAILED";
-            updatedOrphans.push(JSON.stringify(orphan));
-            continue;
-        };
+        // Use the stored normalizedTitle for matching
+        const baseTitle = orphan.normalizedTitle; 
 
-        const baseTitle = normalizeBaseTitle(orphan.threadTitle); // Use thread title for matching
-
-        if (knownTitles.has(baseTitle)) {
+        if (baseTitle && knownTitles.has(baseTitle)) {
             const tmdbId = knownTitles.get(baseTitle);
             if (tmdbId) {
                 logger.info({ title: baseTitle, tmdbId }, 'Rescuing orphan! Found a match in cache.');
-                await addStream(tmdbId, parsedStream);
-                rescued = true;
-                rescuedCount++;
+                const minimalMagnet = `magnet:?xt=urn:btih:${orphan.infoHash}&dn=${encodeURIComponent(orphan.displayName)}`;
+                const parsedStream = parseTitle(minimalMagnet);
+                if (parsedStream) {
+                    await addStream(tmdbId, parsedStream);
+                    rescued = true;
+                    rescuedCount++;
+                }
             }
         }
 
