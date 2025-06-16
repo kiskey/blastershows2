@@ -9,38 +9,19 @@ const LANG_MAP = {
     tamil: 'ta', malayalam: 'ml', telugu: 'te', hindi: 'hi', english: 'en', korean: 'ko', japanese: 'ja', chi: 'zh'
 };
 
-// --- THE ULTIMATE MASTER REGEX LIST ---
 const PARSING_PATTERNS = [
     // Case 1: Packs like S01EP(01-13) or S01 EP (01-15) or S01(E01-26)
-    {
-        regex: /S(\d{1,2})\s?EP?\s?\((\d{1,3})[-‑](\d{1,3})\)/i,
-        type: 'EPISODE_PACK'
-    },
+    { regex: /S(\d{1,2})\s?EP?\s?\((\d{1,3})[-‑](\d{1,3})\)/i, type: 'EPISODE_PACK' },
     // Case 2: Packs like S02EP01-07 or S01E01-E16
-    {
-        regex: /S(\d{1,2})\s?E(\d{1,3})[-‑]E?(\d{1,3})/i,
-        type: 'EPISODE_PACK'
-    },
+    { regex: /S(\d{1,2})\s?E(\d{1,3})[-‑]E?(\d{1,3})/i, type: 'EPISODE_PACK' },
     // Case 3: Packs like S01EP01-04 (no space, no parens)
-    {
-        regex: /S(\d{1,2})EP(\d{1,3})[-‑](\d{1,3})/i,
-        type: 'EPISODE_PACK'
-    },
+    { regex: /S(\d{1,2})EP(\d{1,3})[-‑](\d{1,3})/i, type: 'EPISODE_PACK' },
     // Case 4: Packs like S01 (01-24) without an 'E'
-    {
-        regex: /S(\d{1,2})\s?\((\d{1,3})[-‑](\d{1,3})\)/i,
-        type: 'EPISODE_PACK'
-    },
+    { regex: /S(\d{1,2})\s?\((\d{1,3})[-‑](\d{1,3})\)/i, type: 'EPISODE_PACK' },
     // Case 5: Single Episodes like S01EP16, S02 EP(06), or S03 EP(07)
-    {
-        regex: /S(\d{1,2})\s?EP?\(?(\d{1,3})\)?(?!-)/i,
-        type: 'SINGLE_EPISODE'
-    },
+    { regex: /S(\d{1,2})\s?EP?\(?(\d{1,3})\)?(?!-)/i, type: 'SINGLE_EPISODE' },
     // Case 6: Season-only packs like S1, S02, or titles with "Complete"
-    {
-        regex: /(?:S|Season)\s*(\d{1,2})(?!\s?E|\s?\d)|(Complete)/i,
-        type: 'SEASON_PACK'
-    }
+    { regex: /(?:S|Season)\s*(\d{1,2})(?!\s?E|\s?\d)|(Complete)/i, type: 'SEASON_PACK' }
 ];
 
 function parseTitle(magnetUri) {
@@ -56,7 +37,6 @@ function parseTitle(magnetUri) {
     let season = null;
     let episodes = [];
 
-    // Loop through our master list. First definitive match wins.
     for (const pattern of PARSING_PATTERNS) {
         const match = titleToParse.match(pattern.regex);
         if (match) {
@@ -74,14 +54,12 @@ function parseTitle(magnetUri) {
                     episodes = Array.from({ length: endEp - startEp + 1 }, (_, i) => startEp + i);
                 }
             }
-            
             if (season && (episodes.length > 0 || pattern.type === 'SEASON_PACK')) {
                 break;
             }
         }
     }
 
-    // If our regexes failed, trust the ptt library as a last resort
     if (!season && episodes.length === 0) {
         if (ptt.season) season = ptt.season;
         if (ptt.episode) episodes.push(ptt.episode);
@@ -115,20 +93,31 @@ function getLanguages(title, pttLangs = []) {
     return languages.size > 0 ? Array.from(languages) : ['en'];
 }
 
+// --- THIS IS THE CORRECT, FINAL NORMALIZER FUNCTION ---
 function normalizeBaseTitle(title) {
     if (!title) return '';
     
-    const ptt = parse(title);
-    let cleanTitle = ptt.title && ptt.title.length > 3 ? ptt.title : title;
+    // First, remove years and any bracketed content.
+    let cleanTitle = title
+        .replace(/\b((19|20)\d{2})\b/g, '')
+        .replace(/\[[^\]]+\]/g, '');
+
+    // Now, use the library on this pre-cleaned title to get the core name.
+    // This is good at stripping S01, E01, etc.
+    const ptt = parse(cleanTitle);
     
-    cleanTitle = cleanTitle.replace(/\b(S\d+|Season\s*\d+|E\d+|Episode\s*\d+|Complete)\b/gi, '');
-    cleanTitle = cleanTitle.replace(/\b((19|20)\d{2})\b/g, '');
-    cleanTitle = cleanTitle.replace(/\[[^\]]+\]/g, '');
-    cleanTitle = cleanTitle.replace(/\([^)]+\)/g, '');
-    cleanTitle = cleanTitle.replace(/[...]/g, ' ');
-    cleanTitle = cleanTitle.replace(/[-_]/g, ' ');
-    
-    return cleanTitle.trim().replace(/\s+/g, ' ').toLowerCase();
+    // Prioritize the library's parsed title if it's substantial.
+    cleanTitle = ptt.title && ptt.title.length > 2 ? ptt.title : cleanTitle;
+
+    // Final cleanup: remove known junk words, normalize spacing, but keep important punctuation.
+    cleanTitle = cleanTitle
+        .replace(/\b(tamil|hindi|telugu|english|uncut|complete|hq|hd|hdrip|avc|ddp5 1|web-dl|x264|aac)\b/gi, '')
+        .replace(/[-_]/g, ' ') // Replace hyphens and underscores with spaces
+        .replace(/[()]/g, '') // Remove parentheses
+        .trim()
+        .replace(/\s+/g, ' '); // Collapse multiple spaces into one
+
+    return cleanTitle.toLowerCase();
 }
 
 module.exports = { parseTitle, normalizeBaseTitle };
