@@ -176,19 +176,38 @@ async function getCustomCatalog() {
     return results.map(item => JSON.parse(item));
 }
 
-async function logUnmatchedMagnet(magnetUri, originalTitle, sourceUrl, reason) {
+// --- START OF NEW logUnmatchedMagnet function ---
+/**
+ * Logs a magnet that could not be matched, storing only essential info.
+ * @param {string} magnetUri - The full magnet URI.
+ * @param {string} threadTitle - The title of the forum thread.
+ * @param {string} sourceUrl - The URL of the forum thread.
+ * @param {string} reason - The reason for the failure.
+ */
+async function logUnmatchedMagnet(magnetUri, threadTitle, sourceUrl, reason) {
     const orphanKey = 'unmatched_magnets';
+    
+    // Parse the magnet URI to extract clean info
+    const infoHashMatch = magnetUri.match(/btih:([a-fA-F0-9]{40})/i);
+    const dnMatch = magnetUri.match(/dn=([^&]+)/i);
+
+    const infoHash = infoHashMatch ? infoHashMatch[1] : 'N/A';
+    const displayName = dnMatch ? decodeURIComponent(dnMatch[1]).replace(/\+/g, ' ') : 'N/A';
+
     const data = {
-        magnet: magnetUri,
-        title: originalTitle,
-        source: sourceUrl,
-        reason: reason,
-        attempts: 1, // First time it's logged, attempts is 1
+        infoHash,
+        displayName,
+        threadTitle,
+        sourceUrl,
+        reason,
+        attempts: 1, // Always starts at 1
         loggedAt: new Date().toISOString()
     };
+    
     await redis.lpush(orphanKey, JSON.stringify(data));
-    logger.debug({ title: originalTitle, reason }, 'Logged an orphan magnet.');
+    logger.debug({ title: threadTitle, reason }, 'Logged a clean orphan magnet.');
 }
+// --- END OF NEW logUnmatchedMagnet function ---
 
 async function updateThreadTimestamp(threadUrl) {
     const threadKey = `thread:${Buffer.from(threadUrl).toString('base64')}`;
@@ -216,7 +235,7 @@ async function getThreadsToRevisit() {
 }
 
 
-// --- `rescueOrphanedMagnets` is now much smarter ---
+// --- rescueOrphanedMagnets now handles the new orphan structure ---
 async function rescueOrphanedMagnets() {
     logger.info('Starting advanced orphan rescue job...');
     const orphanKey = 'unmatched_magnets';
@@ -251,32 +270,35 @@ async function rescueOrphanedMagnets() {
     for (const orphanString of allOrphans) {
         let orphan = JSON.parse(orphanString);
         let rescued = false;
+        
+        // Reconstruct a minimal magnet URI for parsing
+        const minimalMagnet = `magnet:?xt=urn:btih:${orphan.infoHash}&dn=${encodeURIComponent(orphan.displayName)}`;
+        const parsedStream = parseTitle(minimalMagnet);
+        if (!parsedStream) {
+            orphan.attempts = (orphan.attempts || 1) + 1;
+            orphan.reason = "RESCUE_PARSE_FAILED";
+            updatedOrphans.push(JSON.stringify(orphan));
+            continue;
+        };
 
-        const baseTitle = normalizeBaseTitle(orphan.title);
+        const baseTitle = normalizeBaseTitle(orphan.threadTitle); // Use thread title for matching
 
         if (knownTitles.has(baseTitle)) {
             const tmdbId = knownTitles.get(baseTitle);
-            const imdbId = await redis.get(`tmdb_map:${tmdbId}`); // Assuming we store a reverse map
-
             if (tmdbId) {
                 logger.info({ title: baseTitle, tmdbId }, 'Rescuing orphan! Found a match in cache.');
-                const parsedStream = parseTitle(orphan.magnet);
-                if (parsedStream) {
-                    await addStream(tmdbId, parsedStream);
-                    rescuedCount++;
-                    rescued = true;
-                }
+                await addStream(tmdbId, parsedStream);
+                rescued = true;
+                rescuedCount++;
             }
         }
 
         if (!rescued) {
-            // If not rescued, increment the attempt counter and keep it in the list
             orphan.attempts = (orphan.attempts || 1) + 1;
             updatedOrphans.push(JSON.stringify(orphan));
         }
     }
     
-    // Atomically replace the old orphan list with the new one (containing only un-rescued items)
     if (allOrphans.length > 0) {
         const pipeline = redis.pipeline();
         pipeline.del(orphanKey);
@@ -288,6 +310,8 @@ async function rescueOrphanedMagnets() {
     
     logger.info({ rescued: rescuedCount, remaining: updatedOrphans.length }, 'Orphan rescue job finished.');
 }
+
+
 module.exports = {
     findOrCreateShow,
     addStream,
