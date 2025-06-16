@@ -12,37 +12,33 @@ const workerPool = new WorkerPool(config.MAX_CONCURRENCY, './src/workers/threadP
 async function getValidUrl(url) {
     try {
         const response = await axios.get(config.DOMAIN_MONITOR, {
-            maxRedirects: 5,
-            timeout: 10000,
-            headers: { 'User-Agent': config.USER_AGENT }
+            maxRedirects: 5, timeout: 10000, headers: { 'User-Agent': config.USER_AGENT }
         });
         const finalUrl = response.request.res.responseUrl;
         const domain = new URL(finalUrl).origin;
         logger.info(`Master domain resolved to: ${domain}`);
         return url.replace(new URL(config.FORUM_URL).origin, domain);
     } catch (error) {
-        logger.error({ err: error.message }, 'Failed to resolve master domain. Using default FORUM_URL from config.');
+        logger.error({ err: error.message }, 'Failed to resolve master domain. Using default FORUM_URL.');
         return config.FORUM_URL;
     }
 }
 
-// --- fetchPage now has retry logic ---
 async function fetchPage(url, retries = 3) {
     for (let i = 0; i < retries; i++) {
         try {
             const { data } = await axios.get(url, { headers: { 'User-Agent': config.USER_AGENT }, timeout: 15000 });
             return data;
         } catch (error) {
-            // Don't retry on 404, it's a definitive "not found"
             if (error.response && error.response.status === 404) {
                 return null;
             }
             logger.warn({ url, attempt: i + 1, err: error.message }, `Failed to fetch page. Retrying in 5s...`);
             if (i < retries - 1) {
-                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before the next retry
+                await new Promise(resolve => setTimeout(resolve, 5000));
             } else {
                 logger.error({ url }, `Failed to fetch page after ${retries} attempts.`);
-                throw error; // Throw the final error if all retries fail
+                throw error;
             }
         }
     }
@@ -71,22 +67,18 @@ async function runCrawler(isInitial = false) {
         logger.info(`Crawling page: ${pageUrl}`);
         
         try {
-            const html = await fetchPage(pageUrl); // Now uses the new retry logic
+            const html = await fetchPage(pageUrl);
             if (!html) {
                 logger.info('Reached the end of pagination.');
                 break;
             }
-
             const threadUrls = parseThreadLinks(html);
             totalThreadsFound += threadUrls.length;
             logger.info(`Found ${threadUrls.length} threads on page ${i}. Adding to queue...`);
-
             threadUrls.forEach(url => workerPool.run({ url }));
-
-            await new Promise(resolve => setTimeout(resolve, 500)); 
-
+            await new Promise(resolve => setTimeout(resolve, 500));
         } catch (error) {
-            logger.error({ page: i, err: error.message }, 'Failed to process a page after all retries. Moving to the next one.');
+            logger.error({ page: i, err: error.message }, 'Failed to process a page after all retries. Moving on.');
             continue;
         }
     }
@@ -112,12 +104,8 @@ async function revisitOldThreads() {
 function scheduleCrawls() {
     let isCrawlingNewContent = false;
     let isRevisitingOld = false;
-
     setInterval(async () => {
-        if (isCrawlingNewContent) {
-            logger.warn('New content crawl is already in progress. Skipping this interval.');
-            return;
-        }
+        if (isCrawlingNewContent) { return; }
         isCrawlingNewContent = true;
         try {
             logger.info('Scheduler: Kicking off new content crawl.');
@@ -128,12 +116,8 @@ function scheduleCrawls() {
             isCrawlingNewContent = false;
         }
     }, config.CRAWL_INTERVAL * 1000);
-
     setInterval(async () => {
-        if (isRevisitingOld) {
-            logger.warn('Old thread revisit is already in progress. Skipping this interval.');
-            return;
-        }
+        if (isRevisitingOld) { return; }
         isRevisitingOld = true;
         try {
             logger.info('Scheduler: Kicking off old thread revisit check.');
